@@ -1,0 +1,232 @@
+"""Tests for FC SmartHome API: parsing, auth, control, events, endpoints, BLE frames."""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from custom_components.fc_smarthome.api.client import FcClient
+from custom_components.fc_smarthome.api.const import DEVICE_STATUS_MASKS
+from custom_components.fc_smarthome.api.endpoints import EndpointRegistry
+from custom_components.fc_smarthome.api.models import (
+    Device,
+    LockEventType,
+    LockStatus,
+    LockUserType,
+    TokenPair,
+    parse_ts,
+)
+from custom_components.fc_smarthome.local.ble import build_frame, parse_frame
+
+
+# ---------- endpoints registry ----------
+
+
+def test_registry_defaults_load():
+    reg = EndpointRegistry.load("us")
+    assert reg.base_url.startswith("https://")
+    assert reg.url("login").startswith(reg.base_url)
+
+
+def test_registry_url_device_id():
+    reg = EndpointRegistry.load("eu")
+    url = reg.url("unlock", "dev123")
+    assert "dev123" in url
+
+
+def test_registry_override(tmp_path):
+    f = tmp_path / "override.json"
+    f.write_text('{"paths": {"login": "/x/y"}, "regions": {"us": "https://h"}}')
+    reg = EndpointRegistry.load("us", f)
+    assert reg.url("login") == "https://h/x/y"
+    assert reg.url("devices").startswith("https://h/")
+
+
+def test_registry_drop_none_paths(tmp_path):
+    f = tmp_path / "o.json"
+    f.write_text('{"paths": {"bell": null}}')
+    reg = EndpointRegistry.load("us", f)
+    assert "bell" not in reg.paths
+
+
+# ---------- models ----------
+
+
+def test_parse_ts_ms_and_s():
+    assert parse_ts(1700000000000) is not None
+    assert parse_ts(1700000000) is not None
+    assert parse_ts("2026-09-06T12:00:00+00:00") is not None
+    assert parse_ts(None) is None
+
+
+def test_token_validity():
+    t = TokenPair(access_token="a", expires_at=time.time() + 3600)
+    assert t.valid
+    t2 = TokenPair(access_token="a", expires_at=time.time() - 10)
+    assert not t2.valid
+
+
+def test_lock_status_bitmask():
+    s = LockStatus.from_dev_status(
+        "d1", DEVICE_STATUS_MASKS["locked"] | DEVICE_STATUS_MASKS["tamper"], DEVICE_STATUS_MASKS
+    )
+    assert s.is_locked is True
+    assert s.tamper is True
+    assert s.has_problem
+
+
+def test_lock_status_unlocked_via_latch():
+    s = LockStatus.from_dev_status("d1", DEVICE_STATUS_MASKS["latch_open"], DEVICE_STATUS_MASKS)
+    assert s.is_locked is False
+
+
+# ---------- client parsing (no network) ----------
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    async def text(self):
+        import json
+
+        return json.dumps(self._body)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def make_client():
+    return FcClient("u@example.com", "pw")
+
+
+def test_unwrap_and_listify():
+    c = make_client()
+    assert c._unwrap({"data": {"a": 1}}) == {"a": 1}
+    assert c._unwrap({"result": {"list": [1]}}) == {"list": [1]}
+    assert c._listify({"data": {"devices": [{"id": 1}]}}, "devices") == [{"id": 1}]
+    assert c._listify({"data": {"list": []}}, "devices") == []
+
+
+def test_parse_device_aliases():
+    c = make_client()
+    dev = c._parse_device(
+        {"device_id": "7", "name": "Front", "category": "lock", "batteryVal": "88"}
+    )
+    assert isinstance(dev, Device)
+    assert dev.device_id == "7"
+    assert dev.battery == 88
+    assert dev.is_lock
+
+
+def test_parse_status_int_and_bool():
+    c = make_client()
+    s1 = c._parse_status("d1", {"devStatus": DEVICE_STATUS_MASKS["locked"], "batteryVal": 90})
+    assert s1.locked is True and s1.battery == 90
+    s2 = c._parse_status("d1", {"locked": True})
+    assert s2.locked is True
+
+
+def test_parse_users_int_type():
+    c = make_client()
+    users = c._parse_users(
+        "d1", {"data": {"list": [{"id": 3, "type": 1, "name": "Dad", "pwd": "123456"}]}}
+    )
+    assert users[0].type is LockUserType.FINGER
+    assert users[0].password_masked.startswith("12")
+
+
+def test_parse_events_types():
+    c = make_client()
+    events = c._parse_events(
+        "d1",
+        {
+            "data": {
+                "list": [
+                    {"time": 1700000000000, "type": 1, "user": "Dad", "devStatus": 4},
+                    {"time": 1700000001000, "type": 9, "devStatus": DEVICE_STATUS_MASKS["tamper"]},
+                    {"time": 1700000002000, "type": "bell"},
+                ]
+            }
+        },
+    )
+    # sorted newest-first: bell, tamper, dad
+    assert [e.type for e in events] == [
+        LockEventType.BELL,
+        LockEventType.TAMPER,
+        LockEventType.LOCKED,
+    ]
+    assert events[2].user == "Dad"
+
+
+def test_parse_event_unlock_by_user():
+    c = make_client()
+    ev = c._parse_event(
+        "d1", {"time": 1700000000000, "type": 1, "user": "Mom", "devStatus": 0, "isRemote": 1}
+    )
+    assert ev.type is LockEventType.UNLOCKED
+    assert ev.user == "Mom"
+    assert ev.remote is True
+
+
+# ---------- BLE frames ----------
+
+
+def test_ble_frame_roundtrip():
+    frame = build_frame(0x10, b"000000", seq=7)
+    parsed = parse_frame(frame)
+    assert parsed is not None
+    cmd, seq, payload = parsed
+    assert cmd == 0x10
+    assert seq == 7
+    assert payload == b"000000"
+
+
+def test_ble_frame_corrupt_checksum():
+    frame = bytearray(build_frame(0x10, b"ab", seq=1))
+    frame[-1] ^= 0xFF
+    assert parse_frame(bytes(frame)) is None
+
+
+def test_ble_frame_short():
+    assert parse_frame(b"FCF") is None
+
+
+# ---------- CLI smoke ----------
+
+
+def test_cli_parser_builds():
+    from fcctl.__main__ import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["devices"])
+    assert args.command == "devices"
+
+
+def test_cli_parses_add_user():
+    from fcctl.__main__ import build_parser
+
+    args = build_parser().parse_args(
+        ["--email", "a@b.c", "add-user", "dev1", "--name", "N", "--user-type", "finger"]
+    )
+    assert args.user_type == "finger"
+    assert args.name == "N"
+
+
+# ---------- HA coordinator mapping (no HA required, pure logic) ----------
+
+
+def test_platforms_constant_shape():
+    from custom_components.fc_smarthome.api.const import PLATFORMS
+
+    assert "lock" in PLATFORMS
+    assert "event" in PLATFORMS
