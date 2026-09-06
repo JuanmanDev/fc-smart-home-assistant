@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import time
 from pathlib import Path
@@ -201,6 +200,115 @@ def test_ble_frame_short():
     assert parse_frame(b"FCF") is None
 
 
+# ---------- coordinator-level event plumbing (pure logic) ----------
+
+
+class _FakeBus:
+    def __init__(self):
+        self.fired = []
+
+    def async_fire(self, event_type, payload):
+        self.fired.append((event_type, payload))
+
+
+class _FakeHass:
+    def __init__(self):
+        self.bus = _FakeBus()
+
+
+class _FakeCoordinator:
+    """Standalone test of the event-processing logic without HA."""
+
+
+def test_event_dedup_and_bell_tracking():
+    """Functional: _process_new_events dedups, latches bell, fires bus events."""
+    from custom_components.fc_smarthome.coordinator import FcCoordinator
+    from custom_components.fc_smarthome.api.models import LockEvent, LockEventType, UnlockMethod
+
+    coord = FcCoordinator.__new__(FcCoordinator)  # bypass HA-dependent __init__
+    coord.devices = {}
+    coord.statuses = {}
+    coord.last_event = {}
+    coord.access_log = {}
+    coord.bell_active = {}
+    coord._seen_log_ids = {}
+
+    class _Bus:
+        def __init__(self):
+            self.fired = []
+
+        def async_fire(self, etype, payload):
+            self.fired.append((etype, payload))
+
+    class _Hass:
+        bus = None
+
+    hass = _Hass()
+    hass.bus = _Bus()
+    coord.hass = hass
+
+    def ev(etype, method, user=None, ts="2026-01-01T10:00:00+00:00", uid=None):
+        return LockEvent(
+            type=etype,
+            device_id="d1",
+            timestamp=parse_ts(ts),
+            method=UnlockMethod.coerce(method),
+            user=user,
+            user_id=uid,
+            raw={"id": ""},
+        )
+
+    batch1 = [
+        ev(LockEventType.BELL, None, ts="2026-01-01T10:00:01+00:00"),
+        ev(LockEventType.UNLOCKED, "finger", user="Mom", ts="2026-01-01T10:00:00+00:00"),
+    ]
+    coord._process_new_events("d1", batch1)
+    assert len(hass.bus.fired) == 2
+    # bell latch stores a timestamp; sensor reads bool(truthy)
+    assert coord.bell_active["d1"] is not False and coord.bell_active["d1"] is not None
+    assert coord.last_event["d1"].type is LockEventType.BELL
+    assert len(coord.access_log["d1"]) == 2
+
+    # replaying the same batch must not fire anything new
+    coord._process_new_events("d1", batch1)
+    assert len(hass.bus.fired) == 2
+    assert len(coord.access_log["d1"]) == 2
+
+    # a genuinely new event fires again
+    coord._process_new_events(
+        "d1", [ev(LockEventType.LOCKED, "app", ts="2026-01-01T10:05:00+00:00")]
+    )
+    assert len(hass.bus.fired) == 3
+    fired_types = [p["event_type"] for _, p in hass.bus.fired]
+    assert "unlocked" in fired_types and "bell" in fired_types and "locked" in fired_types
+
+
+def test_bell_expiry():
+    from custom_components.fc_smarthome.coordinator import BELL_LATCH_SECONDS, FcCoordinator
+
+    coord = FcCoordinator.__new__(FcCoordinator)
+    coord.bell_active = {"d1": __import__("time").time() - BELL_LATCH_SECONDS - 1}
+    coord._expire_bells()
+    assert "d1" not in coord.bell_active
+
+
+def test_event_key_stability():
+    from custom_components.fc_smarthome.api.models import LockEvent, LockEventType
+    from custom_components.fc_smarthome.coordinator import FcCoordinator
+
+    ev = LockEvent(
+        type=LockEventType.UNLOCKED,
+        device_id="d1",
+        method=None,
+        user="Mom",
+        raw={"id": 5},
+    )
+    k1 = FcCoordinator._event_key(ev)
+    k2 = FcCoordinator._event_key(ev)
+    assert k1 == k2
+    assert k1[1] == "unlocked"
+
+
 # ---------- CLI smoke ----------
 
 
@@ -222,7 +330,7 @@ def test_cli_parses_add_user():
     assert args.name == "N"
 
 
-# ---------- HA coordinator mapping (no HA required, pure logic) ----------
+# ---------- HA coordinator mapping (pure logic) ----------
 
 
 def test_platforms_constant_shape():
@@ -230,3 +338,68 @@ def test_platforms_constant_shape():
 
     assert "lock" in PLATFORMS
     assert "event" in PLATFORMS
+    assert "switch" in PLATFORMS
+    assert "button" in PLATFORMS
+    assert "binary_sensor" in PLATFORMS
+    assert "sensor" in PLATFORMS
+
+
+# ---------- HTTP-200 error envelope handling ----------
+
+
+class _FakeResp:
+    def __init__(self, status, body):
+        import json as _json
+
+        self.status = status
+        self._text = _json.dumps(body)
+
+    async def text(self):
+        return self._text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _FakeSession:
+    closed = False
+
+    def __init__(self, status, body):
+        self._resp = _FakeResp(status, body)
+
+    def request(self, method, url, **kw):
+        return self._resp
+
+
+@pytest.mark.asyncio
+async def test_error_envelope_raises_auth():
+    from custom_components.fc_smarthome.api.errors import FcAuthError
+
+    c = FcClient("u@example.com", "pw")
+    c.tokens = TokenPair(access_token="tok")
+    c._session = _FakeSession(200, {"code": 1001, "msg": "token expired"})
+    with pytest.raises(FcAuthError):
+        await c._request("GET", "https://x/y")
+
+
+@pytest.mark.asyncio
+async def test_error_envelope_raises_api_error():
+    from custom_components.fc_smarthome.api.errors import FcApiError
+
+    c = FcClient("u@example.com", "pw")
+    c.tokens = TokenPair(access_token="tok")
+    c._session = _FakeSession(200, {"code": 500, "msg": "device offline"})
+    with pytest.raises(FcApiError):
+        await c._request("GET", "https://x/y")
+
+
+@pytest.mark.asyncio
+async def test_success_envelope_passes():
+    c = FcClient("u@example.com", "pw")
+    c.tokens = TokenPair(access_token="tok")
+    c._session = _FakeSession(200, {"code": 0, "data": {"ok": True}})
+    body = await c._request("GET", "https://x/y")
+    assert body["data"]["ok"] is True

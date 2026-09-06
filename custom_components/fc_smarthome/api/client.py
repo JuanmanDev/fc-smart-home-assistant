@@ -17,7 +17,7 @@ from typing import Any, Callable
 import aiohttp
 
 from .endpoints import EndpointRegistry
-from .errors import FcApiError, FcAuthError, FcConnectionError
+from .errors import FcApiError, FcAuthError, FcConnectionError, FcError
 from .models import (
     ControlResult,
     Device,
@@ -125,6 +125,25 @@ class FcClient:
                             code=resp.status,
                             payload=body,
                         )
+                    # Chinese IoT clouds commonly answer HTTP 200 with an
+                    # error envelope: {"code": 1001, "msg": "token expired"}
+                    if isinstance(body, dict):
+                        err_code = body.get("code")
+                        if err_code is None:
+                            err_code = body.get("errcode")
+                        if err_code is None:
+                            err_code = body.get("error")
+                        if err_code is not None and str(err_code) not in ("0", "200", "success", "ok"):
+                            msg = str(body.get("msg") or body.get("message") or body_text[:200])
+                            if "token" in msg.lower() or str(err_code) in ("401", "1001", "1002"):
+                                raise FcAuthError(
+                                    f"API error {err_code} from {url}: {msg}"
+                                )
+                            raise FcApiError(
+                                f"API error {err_code} from {url}: {msg}",
+                                code=err_code if isinstance(err_code, int) else resp.status,
+                                payload=body,
+                            )
                     return body
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 last_error = err
@@ -153,7 +172,11 @@ class FcClient:
             access_token=str(token),
             refresh_token=data.get("refresh_token") or data.get("refreshToken"),
             user_id=str(data.get("user_id") or data.get("userId") or data.get("uid") or "") or None,
-            expires_at=data.get("expires_at") or (time.time() + data.get("expires_in", 7200) if isinstance(data.get("expires_in"), int) else 0),
+            expires_at=(
+                data["expires_at"]
+                if isinstance(data.get("expires_at"), (int, float))
+                else (time.time() + data["expires_in"]) if isinstance(data.get("expires_in"), int) else 0.0
+            ),
         )
         return self.tokens
 
@@ -255,7 +278,11 @@ class FcClient:
         if not device_id:
             return None
         category = str(item.get("category") or item.get("type") or "").lower()
-        battery = item.get("battery") or item.get("batteryVal") or item.get("power")
+        battery = item.get("battery")
+        if battery is None:
+            battery = item.get("batteryVal")
+        if battery is None:
+            battery = item.get("power")
         if isinstance(battery, str) and battery.isdigit():
             battery = int(battery)
         raw_status = item.get("dev_status")
@@ -292,13 +319,17 @@ class FcClient:
             status = LockStatus.from_dev_status(device_id, int(dev_status), DEVICE_STATUS_MASKS)
         else:
             status = LockStatus(device_id=device_id)
-            locked = data.get("locked") or data.get("is_locked")
+            locked = data.get("locked")
+            if locked is None:
+                locked = data.get("is_locked")
             if isinstance(locked, bool):
                 status.locked = locked
-        battery = data.get("batteryVal") or data.get("battery")
+        battery = data.get("batteryVal")
+        if battery is None:
+            battery = data.get("battery")
         if isinstance(battery, int):
             status.battery = battery
-        if isinstance(battery, str) and battery.isdigit():
+        elif isinstance(battery, str) and battery.isdigit():
             status.battery = int(battery)
         signal = data.get("rssi")
         if isinstance(signal, int):
@@ -488,7 +519,8 @@ class FcClient:
             ev = self._parse_event(device_id, item)
             if ev:
                 events.append(ev)
-        events.sort(key=lambda e: e.timestamp or parse_ts(0), reverse=True)
+        epoch = parse_ts(1)
+        events.sort(key=lambda e: e.timestamp or epoch, reverse=True)
         return events
 
     def _parse_event(self, device_id: str, item: dict) -> LockEvent | None:
@@ -548,6 +580,12 @@ class FcClient:
             else:
                 user_name = user_raw
                 user_id = item.get("user_id")
+            remote_raw = item.get("isRemote")
+            if remote_raw is None:
+                remote_raw = item.get("remotely")
+            if remote_raw is None:
+                remote_raw = item.get("remote")
+            is_remote = bool(remote_raw)
             return LockEvent(
                 type=etype,
                 device_id=device_id,
@@ -555,7 +593,7 @@ class FcClient:
                 method=method,
                 user=str(user_name) if user_name else None,
                 user_id=str(user_id) if user_id not in (None, "") else None,
-                remote=bool(item.get("isRemote") or item.get("remotely") or item.get("remote")),
+                remote=is_remote,
                 photo_url=item.get("facePhotoUrl"),
                 description=str(item.get("description") or item.get("msg") or ""),
                 raw=item,

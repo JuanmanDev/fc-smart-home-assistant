@@ -1,33 +1,29 @@
-"""Sensor platform: battery, signal, and last-event method per lock."""
+"""Sensor platform: battery, signal, last-event (who/how/when) + access log."""
 
 from __future__ import annotations
-
-import logging
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import FcCoordinator
 
-_LOGGER = logging.getLogger(__name__)
-
 
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+
     entities: list[SensorEntity] = []
     for device_id, device in coordinator.devices.items():
         entities.append(FCLastEventSensor(coordinator, device_id))
         status = coordinator.statuses.get(device_id)
-        if status and status.battery is not None:
+        if status is not None and status.battery is not None:
             entities.append(FCBatterySensor(coordinator, device_id))
-        if status and status.signal is not None:
+        if status is not None and status.signal is not None:
             entities.append(FCSignalSensor(coordinator, device_id))
     async_add_entities(entities)
 
@@ -53,6 +49,7 @@ class FCBatterySensor(FCSensorBase):
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "%"
+    _attr_entity_category = "diagnostic"
 
     def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "battery", "Battery")
@@ -66,6 +63,8 @@ class FCBatterySensor(FCSensorBase):
 class FCSignalSensor(FCSensorBase):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "dBm"
+    _attr_entity_category = "diagnostic"
+    _attr_icon = "mdi:signal"
 
     def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "signal", "Signal")
@@ -77,7 +76,13 @@ class FCSignalSensor(FCSensorBase):
 
 
 class FCLastEventSensor(FCSensorBase):
-    """Who unlocked last: user + method + time as state/attributes."""
+    """Who did what last: user + method as state, full log as attributes.
+
+    Every state change is recorded by HA history/logbook, giving a complete
+    "who accessed, how, when" timeline per lock.
+    """
+
+    _attr_icon = "mdi:history"
 
     def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "last_event", "Last event")
@@ -87,18 +92,20 @@ class FCLastEventSensor(FCSensorBase):
         last = self.coordinator.last_event.get(self.device_id)
         if not last:
             return None
+        method = last.method.value if last.method else None
         if last.user:
-            return f"{last.user} ({last.method.value if last.method else 'unknown'})"
-        if last.method:
-            return last.method.value
+            return f"{last.user} ({method})" if method else last.user
+        if method:
+            return method
         return last.type.value
 
     @property
     def extra_state_attributes(self) -> dict:
         last = self.coordinator.last_event.get(self.device_id)
-        if not last:
-            return {"device_id": self.device_id}
-        return {
-            "device_id": self.device_id,
-            **last.to_dict(),
-        }
+        attrs: dict = {"device_id": self.device_id}
+        if last:
+            attrs.update(last.to_dict())
+        log = self.coordinator.access_log.get(self.device_id)
+        if log:
+            attrs["access_log"] = list(log)
+        return attrs

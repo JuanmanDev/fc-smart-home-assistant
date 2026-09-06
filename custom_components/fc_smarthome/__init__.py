@@ -32,7 +32,6 @@ from .const import (
     CONF_ENDPOINTS_FILE,
     CONF_LOCAL_BLE,
     CONF_PASSWORD,
-    CONF_POLL_INTERVAL,
     CONF_REGION,
     DOMAIN,
     PLATFORMS,
@@ -54,8 +53,8 @@ if _HA_AVAILABLE:
 else:
     CONFIG_SCHEMA = None
 
-ADD_USER_SCHEMA = (
-    vol.Schema(
+if _HA_AVAILABLE:
+    ADD_USER_SCHEMA = vol.Schema(
         {
             vol.Required("device_id"): cv.string,
             vol.Required("name"): cv.string,
@@ -66,51 +65,35 @@ ADD_USER_SCHEMA = (
             vol.Optional("card_id"): cv.string,
         }
     )
-    if _HA_AVAILABLE
-    else None
-)
-DELETE_USER_SCHEMA = (
-    vol.Schema(
+    DELETE_USER_SCHEMA = vol.Schema(
         {
             vol.Required("device_id"): cv.string,
             vol.Required("user_id"): cv.string,
         }
     )
-    if _HA_AVAILABLE
-    else None
-)
-RENAME_USER_SCHEMA = (
-    vol.Schema(
+    RENAME_USER_SCHEMA = vol.Schema(
         {
             vol.Required("device_id"): cv.string,
             vol.Required("user_id"): cv.string,
             vol.Required("name"): cv.string,
         }
     )
-    if _HA_AVAILABLE
-    else None
-)
-ENROLL_FINGERPRINT_SCHEMA = (
-    vol.Schema(
+    ENROLL_FINGERPRINT_SCHEMA = vol.Schema(
         {
             vol.Required("device_id"): cv.string,
             vol.Required("name"): cv.string,
         }
     )
-    if _HA_AVAILABLE
-    else None
-)
-DEVICE_ID_SCHEMA = vol.Schema({vol.Required("device_id"): cv.string}) if _HA_AVAILABLE else None
-CHILD_LOCK_SCHEMA = (
-    vol.Schema(
+    DEVICE_ID_SCHEMA = vol.Schema({vol.Required("device_id"): cv.string})
+    CHILD_LOCK_SCHEMA = vol.Schema(
         {
             vol.Required("device_id"): cv.string,
             vol.Required("enabled"): cv.boolean,
         }
     )
-    if _HA_AVAILABLE
-    else None
-)
+else:
+    ADD_USER_SCHEMA = DELETE_USER_SCHEMA = RENAME_USER_SCHEMA = None
+    ENROLL_FINGERPRINT_SCHEMA = DEVICE_ID_SCHEMA = CHILD_LOCK_SCHEMA = None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -127,7 +110,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         password=entry.data[CONF_PASSWORD],
         region=entry.data.get(CONF_REGION, "us"),
         endpoints=endpoints,
-        on_token_refreshed=lambda tokens: _persist_tokens(hass, entry, tokens),
+        on_token_refreshed=None,
     )
     try:
         await client.login()
@@ -147,23 +130,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "ble": ble_manager,
     }
 
-    await hass.config_entries.async_forward_platform_setups(entry, PLATFORMS)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_reload_entry))
 
     _register_services(hass)
     return True
-
-
-def _persist_tokens(hass: HomeAssistant, entry: ConfigEntry, tokens) -> None:
-    """Keep refreshed tokens in entry data so restarts reuse them."""
-    data = dict(entry.data)
-    data["access_token"] = tokens.access_token
-    data["refresh_token"] = tokens.refresh_token
-    data["token_expires_at"] = tokens.expires_at
-    try:
-        hass.config_entries.async_update_entry(entry, data=data)
-    except Exception:  # noqa: BLE001
-        _LOGGER.debug("Could not persist refreshed tokens")
 
 
 async def _setup_ble(hass: HomeAssistant, endpoints: EndpointRegistry):
@@ -193,15 +164,17 @@ def _client_for_service(hass: HomeAssistant, device_id: str):
 def _register_services(hass: HomeAssistant) -> None:
     if not hass.services.has_service(DOMAIN, SERVICE_FETCH_HISTORY):
 
-        async def _fetch_history(call: ServiceCall) -> None:
-            client, _ = _client_for_service(hass, call.data["device_id"])
+        async def _fetch_history(call: ServiceCall):
+            client, coordinator = _client_for_service(hass, call.data["device_id"])
             events = await client.get_history(call.data["device_id"], limit=100)
-            for ev in events[:10]:
-                _LOGGER.info(
-                    "history %s: %s %s %s", ev.device_id, ev.type.value, ev.user, ev.timestamp
-                )
+            entries = [ev.to_dict() for ev in events]
+            for ev in events:
+                coordinator._process_new_events_single(ev)
+            return {"entries": entries}
 
-        hass.services.async_register(DOMAIN, SERVICE_FETCH_HISTORY, _fetch_history)
+        hass.services.async_register(
+            DOMAIN, SERVICE_FETCH_HISTORY, _fetch_history, supports_response=True
+        )
 
     if not hass.services.has_service(DOMAIN, SERVICE_ADD_USER):
 

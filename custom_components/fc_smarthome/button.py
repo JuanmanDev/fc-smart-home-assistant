@@ -20,14 +20,28 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities: list[ButtonEntity] = []
     for device_id, device in coordinator.devices.items():
         if device.is_lock or device.is_doorbell:
-            entities.append(FCButton(coordinator, device_id, "ring_bell", "Ring bell", coordinator.client.ring_bell))
-            entities.append(FCButton(coordinator, device_id, "beep", "Beep", coordinator.client.beep))
-        entities.append(FCButton(coordinator, device_id, "sync", "Sync now", None))
+            entities.append(
+                FCButton(coordinator, device_id, "ring_bell", "Ring bell", coordinator.client.ring_bell, "mdi:bell-ring")
+            )
+            entities.append(
+                FCButton(coordinator, device_id, "beep", "Locate", coordinator.client.beep, "mdi:map-marker")
+            )
+        entities.append(
+            FCButton(
+                coordinator,
+                device_id,
+                "sync",
+                "Sync now",
+                None,
+                "mdi:sync",
+            )
+        )
     async_add_entities(entities)
 
 
 class FCButton(CoordinatorEntity, ButtonEntity):
     _attr_has_entity_name = True
+    _attr_entity_category = "diagnostic"
 
     def __init__(
         self,
@@ -36,12 +50,14 @@ class FCButton(CoordinatorEntity, ButtonEntity):
         key: str,
         name: str,
         action,
+        icon: str,
     ) -> None:
         super().__init__(coordinator)
         self.device_id = device_id
         device = coordinator.devices[device_id]
         self._attr_unique_id = f"{device_id}_{key}"
         self._attr_name = name
+        self._attr_icon = icon
         self._action = action
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_id)},

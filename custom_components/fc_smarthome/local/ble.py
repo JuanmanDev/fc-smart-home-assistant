@@ -17,7 +17,6 @@ import asyncio
 import contextlib
 import logging
 import random
-import struct
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -318,16 +317,21 @@ class FcBleManager:
             if existing and existing.connected:
                 return existing
             dev = self._discovered.get(address)
-            if dev is None:
-                async with self._lock:
-                    devices = await BleakScanner.discover(timeout=5.0)
-                dev = next((d for d in devices if d.address == address), None)
-            if dev is None:
-                raise FcLocalError(f"BLE device {address} not found")
-            transport = FcBleTransport(dev, self.config)
-            await transport.connect()
+        if dev is None:
+            # scan outside the lock; re-check under it after
+            devices = await BleakScanner.discover(timeout=5.0)
+            for d in devices:
+                self._discovered.setdefault(d.address, d)
+            async with self._lock:
+                dev = self._discovered.get(address)
+        if dev is None:
+            raise FcLocalError(f"BLE device {address} not found")
+        transport = FcBleTransport(dev, self.config)
+        await transport.connect()
+        async with self._lock:
+            # keep the newest connected transport for this address
             self._transports[address] = transport
-            return transport
+        return transport
 
     async def close(self) -> None:
         for transport in self._transports.values():

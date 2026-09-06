@@ -6,7 +6,7 @@ The HA component re-exports these from its own const.py.
 
 DOMAIN = "fc_smarthome"
 
-PLATFORMS = ["lock", "sensor", "binary_sensor", "button", "event"]
+PLATFORMS = ["lock", "sensor", "binary_sensor", "switch", "button", "event"]
 
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"

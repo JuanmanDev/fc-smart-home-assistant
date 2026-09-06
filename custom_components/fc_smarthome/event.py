@@ -1,4 +1,9 @@
-"""Event entities: every lock action (unlock by user X via finger, bell, tamper…)."""
+"""Event entities: fire HA triggers for every lock/bell/alarm event.
+
+Uses HA's EventEntity contract: calling _trigger_event(event_type, data)
+advances the entity's `event` attribute, which the `platform: event` trigger
+listens to. One trigger per distinct new access event (dedup by coordinator).
+"""
 
 from __future__ import annotations
 
@@ -23,6 +28,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 
 class FCEventEntity(CoordinatorEntity, EventEntity):
+    """Trigger-capable event entity mirroring every access event."""
+
     _attr_has_entity_name = True
     _attr_name = "Events"
 
@@ -37,11 +44,8 @@ class FCEventEntity(CoordinatorEntity, EventEntity):
             manufacturer=device.manufacturer or "Fingerchip",
             model=device.model,
         )
-        self._triggered: deque = deque(maxlen=50)
-        coordinator.hass.bus.async_listen_once("homeassistant_started", self._on_start)
-
-    async def _on_start(self, _event) -> None:
-        pass
+        self._recent: deque = deque(maxlen=50)
+        self._last_key: tuple | None = None
 
     @property
     def event_types(self) -> list[str]:
@@ -59,23 +63,39 @@ class FCEventEntity(CoordinatorEntity, EventEntity):
             "unknown",
         ]
 
-    def _handle_coordinator_update(self) -> None:
-        last = self.coordinator.last_event.get(self.device_id)
-        if last:
-            self._triggered.append(
-                {
-                    "event_type": last.type.value,
-                    "event": {
-                        "method": last.method.value if last.method else None,
-                        "user": last.user,
-                        "user_id": last.user_id,
-                        "remote": last.remote,
-                        "timestamp": last.timestamp.isoformat() if last.timestamp else None,
-                    },
-                }
-            )
-        self.async_write_ha_state()
-
     @property
     def extra_state_attributes(self) -> dict:
-        return {"recent_events": list(self._triggered)}
+        return {
+            "recent_events": list(self._recent),
+            "access_log_count": len(
+                self.coordinator.access_log.get(self.device_id, ())
+            ),
+        }
+
+    def _handle_coordinator_update(self) -> None:
+        last = self.coordinator.last_event.get(self.device_id)
+        if last is None:
+            self.async_write_ha_state()
+            return
+        data = {
+            "device_id": self.device_id,
+            "method": last.method.value if last.method else None,
+            "user": last.user,
+            "user_id": last.user_id,
+            "remote": last.remote,
+            "timestamp": last.timestamp.isoformat() if last.timestamp else None,
+            "description": last.description,
+        }
+        key = (
+            last.type.value,
+            data["timestamp"],
+            data["user_id"],
+            data["method"],
+        )
+        if key == self._last_key:
+            self.async_write_ha_state()
+            return
+        self._last_key = key
+        self._recent.appendleft(dict(data, event_type=last.type.value))
+        # advances the `event` attribute -> event-platform triggers fire
+        self._trigger_event(last.type.value, data)

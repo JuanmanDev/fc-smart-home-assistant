@@ -218,6 +218,23 @@ class LockStatus:
     def has_problem(self) -> bool:
         return bool(self.tamper or self.door_open_long or self.motor_error)
 
+    def to_dict(self) -> dict:
+        return {
+            "device_id": self.device_id,
+            "locked": self.locked,
+            "is_locked": self.is_locked,
+            "door_open": self.door_open,
+            "door_open_long": self.door_open_long,
+            "tamper": self.tamper,
+            "low_battery": self.low_battery,
+            "child_lock": self.child_lock,
+            "motor_error": self.motor_error,
+            "latch_open": self.latch_open,
+            "motor_moving": self.motor_moving,
+            "battery": self.battery,
+            "signal": self.signal,
+        }
+
 
 @dataclass
 class Device:
@@ -248,6 +265,13 @@ class ControlResult:
     message: str = ""
     command_id: str | None = None
     raw: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "success": self.success,
+            "message": self.message,
+            "command_id": self.command_id,
+        }
 
 
 @dataclass

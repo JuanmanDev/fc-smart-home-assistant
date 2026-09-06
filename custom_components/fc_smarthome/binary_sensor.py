@@ -1,4 +1,4 @@
-"""Binary sensors: door open, tamper, low battery, motor error, online."""
+"""Binary sensors: door, bell ringing, tamper, low battery, motor error, online."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -22,17 +21,51 @@ async def async_setup_entry(hass, entry, async_add_entities):
         if status is None:
             continue
         if status.door_open is not None:
-            entities.append(FCBinarySensor(coordinator, device_id, "door", BinarySensorDeviceClass.DOOR, "door_open"))
-        if status.door_open_long is not None:
-            entities.append(FCBinarySensor(coordinator, device_id, "door_open_long", BinarySensorDeviceClass.PROBLEM, "door_open_long"))
+            entities.append(
+                FCBinary(coordinator, device_id, "door", BinarySensorDeviceClass.DOOR, "door_open")
+            )
         if status.tamper is not None:
-            entities.append(FCBinarySensor(coordinator, device_id, "tamper", BinarySensorDeviceClass.TAMPER, "tamper"))
+            entities.append(
+                FCBinary(coordinator, device_id, "tamper", BinarySensorDeviceClass.TAMPER, "tamper")
+            )
+        if status.door_open_long is not None:
+            entities.append(
+                FCBinary(
+                    coordinator,
+                    device_id,
+                    "door_open_long",
+                    BinarySensorDeviceClass.PROBLEM,
+                    "door_open_long",
+                )
+            )
         if status.motor_error is not None:
-            entities.append(FCBinarySensor(coordinator, device_id, "motor_error", BinarySensorDeviceClass.PROBLEM, "motor_error"))
+            entities.append(
+                FCBinary(
+                    coordinator,
+                    device_id,
+                    "motor_error",
+                    BinarySensorDeviceClass.PROBLEM,
+                    "motor_error",
+                )
+            )
+        if status.low_battery is not None:
+            entities.append(
+                FCBinary(
+                    coordinator,
+                    device_id,
+                    "low_battery",
+                    BinarySensorDeviceClass.PROBLEM,
+                    "low_battery",
+                )
+            )
+        if device.is_doorbell:
+            entities.append(
+                FCBellPlaying(coordinator, device_id)
+            )
     async_add_entities(entities)
 
 
-class FCBinarySensor(CoordinatorEntity, BinarySensorEntity):
+class FCBinary(CoordinatorEntity, BinarySensorEntity):
     _attr_has_entity_name = True
 
     def __init__(
@@ -49,6 +82,8 @@ class FCBinarySensor(CoordinatorEntity, BinarySensorEntity):
         self._attr_unique_id = f"{device_id}_{key}"
         self._attr_name = key.replace("_", " ").title()
         self._attr_device_class = device_class
+        if key != "door":
+            self._attr_entity_category = "diagnostic"
         self._attr = attr
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_id)},
@@ -62,4 +97,37 @@ class FCBinarySensor(CoordinatorEntity, BinarySensorEntity):
         status = self.coordinator.statuses.get(self.device_id)
         if status is None:
             return None
-        return bool(getattr(status, self._attr))
+        value = getattr(status, self._attr)
+        return bool(value) if value is not None else None
+
+    @property
+    def available(self) -> bool:
+        return self.device_id in self.coordinator.statuses
+
+
+class FCBellPlaying(CoordinatorEntity, BinarySensorEntity):
+    """Binary sensor that's ON while the doorbell is ringing (event-latched)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Bell ringing"
+    _attr_icon = "mdi:bell-ring"
+
+    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+        super().__init__(coordinator)
+        self.device_id = device_id
+        device = coordinator.devices[device_id]
+        self._attr_unique_id = f"{device_id}_bell_ringing"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device_id)},
+            name=device.name,
+            manufacturer=device.manufacturer or "Fingerchip",
+            model=device.model,
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        return bool(self.coordinator.bell_active.get(self.device_id))
+
+    @property
+    def available(self) -> bool:
+        return self.device_id in self.coordinator.devices

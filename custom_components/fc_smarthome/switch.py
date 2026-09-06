@@ -28,6 +28,7 @@ class FCChildLockSwitch(CoordinatorEntity, SwitchEntity):
     _attr_has_entity_name = True
     _attr_name = "Child lock"
     _attr_icon = "mdi:human-child"
+    _attr_entity_category = "config"
 
     def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
         super().__init__(coordinator)

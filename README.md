@@ -106,17 +106,28 @@ Entities created per lock (example device *Front Door*):
 lock.front_door
 sensor.front_door_battery
 sensor.front_door_signal
-sensor.front_door_last_event     # "Dad (finger)" + full attributes
+sensor.front_door_last_event     # "Dad (finger)" + full access log attributes
 binary_sensor.front_door_door
 binary_sensor.front_door_tamper
 binary_sensor.front_door_door_open_long
 binary_sensor.front_door_motor_error
+binary_sensor.front_door_low_battery
+binary_sensor.front_door_bell_ringing   # doorbell models: ON while ringing
 switch.front_door_child_lock
 button.front_door_ring_bell
-button.front_door_beep
+button.front_door_locate
 button.front_door_sync_now
 event.front_door_events          # trigger-capable event entity
 ```
+
+Every access is recorded three ways:
+
+1. **`event.front_door_events`** — fires a HA trigger per event (use with
+   `platform: event`); attributes hold the last 50 events.
+2. **`sensor.front_door_last_event`** — state changes land in HA **history +
+   logbook**, giving a permanent "who/how/when" timeline; `access_log`
+   attribute keeps the last 200 entries.
+3. **Bus event `fc_smarthome_event`** — for blueprint/legacy automations.
 
 ### Who-unlocked automation (trigger-based)
 

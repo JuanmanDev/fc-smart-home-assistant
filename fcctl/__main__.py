@@ -92,16 +92,21 @@ async def cmd_login(args) -> None:
 
 
 async def cmd_logout(args) -> None:
-    client = build_client(args)
     if TOKEN_FILE.exists():
         TOKEN_FILE.unlink()
-    try:
-        await _login_flow(client, interactive=False)
-        await client.logout()
-    except FcError:
-        pass
-    print("Logged out.")
-    await client.close()
+    registry = EndpointRegistry.load(getattr(args, "region", "us"))
+    client = FcClient("", "", getattr(args, "region", "us"), registry)
+    if TOKEN_FILE.exists():
+        TOKEN_FILE.unlink()
+    if os.environ.get("FC_EMAIL") and os.environ.get("FC_PASSWORD"):
+        client = build_client(args)
+        try:
+            await _login_flow(client, interactive=False)
+            await client.logout()
+        except FcError:
+            pass
+        await client.close()
+    print("Logged out (stored tokens removed).")
 
 
 async def cmd_devices(args) -> None:

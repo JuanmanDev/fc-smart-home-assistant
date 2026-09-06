@@ -1,11 +1,10 @@
-"""Lock platform: lock/unlock/latch with attribute-rich state, BLE fallback."""
+"""Lock platform: lock/unlock/latch with attribute-rich state."""
 
 from __future__ import annotations
 
 import logging
 
 from homeassistant.components.lock import LockEntity, LockEntityFeature
-from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -31,6 +30,7 @@ class FCLock(CoordinatorEntity, LockEntity):
 
     _attr_has_entity_name = True
     _attr_name = None
+    _attr_code_format = None
 
     def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
         super().__init__(coordinator)
@@ -50,24 +50,17 @@ class FCLock(CoordinatorEntity, LockEntity):
         return self.device_id in self.coordinator.statuses
 
     @property
-    def lock_state(self) -> str | None:
+    def is_locked(self) -> bool | None:
         status = self.coordinator.statuses.get(self.device_id)
         if status is None:
             return None
-        locked = status.is_locked
-        if locked is None:
-            return None
-        return "locked" if locked else "unlocked"
-
-    @property
-    def is_locked(self) -> bool | None:
-        return self.lock_state == "locked"
+        return status.is_locked
 
     @property
     def extra_state_attributes(self) -> dict:
         status = self.coordinator.statuses.get(self.device_id)
         last = self.coordinator.last_event.get(self.device_id)
-        attrs = {"device_id": self.device_id}
+        attrs: dict = {"device_id": self.device_id}
         if status:
             attrs.update(
                 {
@@ -86,26 +79,19 @@ class FCLock(CoordinatorEntity, LockEntity):
         return attrs
 
     async def async_lock(self, **kwargs):
-        client = self.coordinator.client
-        result = await client.lock(self.device_id)
+        result = await self.coordinator.client.lock(self.device_id)
         if not result.success:
             _LOGGER.error("Lock command failed: %s", result.message)
         await self.coordinator.async_request_refresh()
 
     async def async_unlock(self, **kwargs):
-        client = self.coordinator.client
-        result = await client.unlock(self.device_id, reason="app")
+        result = await self.coordinator.client.unlock(self.device_id, reason="app")
         if not result.success:
             _LOGGER.error("Unlock command failed: %s", result.message)
         await self.coordinator.async_request_refresh()
 
     async def async_open(self, **kwargs):
-        client = self.coordinator.client
-        result = await client.latch(self.device_id)
+        result = await self.coordinator.client.latch(self.device_id)
         if not result.success:
             _LOGGER.error("Latch/open command failed: %s", result.message)
         await self.coordinator.async_request_refresh()
-
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        self.async_write_ha_state()
