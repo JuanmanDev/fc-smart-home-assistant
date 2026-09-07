@@ -31,7 +31,7 @@ from .models import (
     parse_ts,
 )
 from .const import DEVICE_STATUS_MASKS, UNLOCK_METHOD_LABELS, USER_TYPE_INT_MAP
-from .discovery import APP_VERSION, VENDOR_AES_KEY, try_aes_decrypt, try_aes_encrypt
+from .discovery import APP_VERSION, try_aes_decrypt, try_aes_encrypt
 
 _LOGGER = logging.getLogger(__name__)
 
