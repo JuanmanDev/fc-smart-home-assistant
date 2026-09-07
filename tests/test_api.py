@@ -385,8 +385,6 @@ def test_platforms_constant_shape():
 def test_lan_module_imports():
     from custom_components.fc_smarthome.local.lan import LanConfig
 
-    from custom_components.fc_smarthome.local.router import FcTransportRouter  # noqa: F401
-
     cfg = LanConfig()
     assert cfg.coap_port == 5683
     assert 8060 in cfg.tcp_ports
