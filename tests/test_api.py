@@ -225,9 +225,7 @@ def test_aes_vendor_crypto_roundtrip():
         try_aes_encrypt,
     )
 
-    try:
-        from Crypto.Cipher import AES as _AES  # noqa: F401
-    except ImportError:
+    if try_aes_encrypt("x") is None:
         import pytest
 
         pytest.skip("pycryptodome not installed")
