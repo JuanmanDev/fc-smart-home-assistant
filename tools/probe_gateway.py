@@ -66,9 +66,10 @@ def banner_grab(host: str, port: int) -> None:
 
 
 def coap_probe(host: str, port: int = 5683) -> None:
+    import struct
+
     msg_id = random.randint(1, 0xFFFF)
     pkt = struct.pack("!BBH", 0x40, 0x00, msg_id)  # CON ping
-    import struct as st  # noqa: F401
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(2)
@@ -115,6 +116,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    import struct  # noqa: F401
-
     main()

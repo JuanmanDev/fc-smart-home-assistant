@@ -1,4 +1,4 @@
-"""Deep probe of the local 192.168.2.x subnet: find the FC gateway/lock.
+﻿"""Deep probe of the local 192.168.2.x subnet: find the FC gateway/lock.
 
 1. ARP-scan-like sweep: ICMP ping all 254 addresses (fast, parallel)
 2. For live hosts: CoAP probe (5683/UDP) + common port scan
@@ -34,7 +34,7 @@ def ping(host: str) -> bool:
 
 
 def coap_probe(host: str, port: int = 5683, timeout: float = 1.5) -> dict | None:
-    """RFC-7252 empty GET to / — CoAP stacks answer ACK."""
+    """RFC-7252 empty GET to / â€” CoAP stacks answer ACK."""
     msg_id = random.randint(1, 0xFFFF)
     pkt = struct.pack("!BBH", 0x42, 0x01, msg_id) + bytes([1, 2]) + bytes([11, 0])
     # GET / : single Uri-Path option with empty value? Use plain ping instead:
@@ -103,7 +103,7 @@ async def main() -> None:
             s = socket.create_connection(("192.168.2.1", p), timeout=2)
             s.sendall(f"GET / HTTP/1.1\r\nHost: 192.168.2.1\r\n\r\n".encode())
             data = s.recv(256)
-            print(f"  HTTP {p}: {data[:180]!r}")
+            print(f"  HTTP {p}: " + repr(data[:180]))
             s.close()
             break
         except OSError:
@@ -112,3 +112,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
