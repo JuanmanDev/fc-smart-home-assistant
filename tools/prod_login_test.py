@@ -1,12 +1,10 @@
-"""Production login test — credentials from environment variables ONLY.
+"""Production login test — credentials from environment or .env ONLY.
 
-Required env vars (never hardcode, never commit):
-    FC_PHONE      your phone number (digits only)
-    FC_CC         country code digits, e.g. 34
-    FC_PASSWORD   the account password
+Loads FC_PHONE / FC_CC / FC_PASSWORD from env vars or a local .env
+(gitignored). Never hardcode, never commit credentials.
 
-Usage (PowerShell, local only):
-    $env:FC_PHONE="..."; $env:FC_CC="34"; $env:FC_PASSWORD="..."
+Usage (PowerShell, local):
+    copy .env.example .env   # then edit .env with your real credentials
     python tools/prod_login_test.py
 """
 
@@ -24,11 +22,25 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from custom_components.fc_smarthome.api.client import FcClient
 from custom_components.fc_smarthome.api.errors import FcError
 
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+
+
+def load_env_file() -> None:
+    """Minimal .env loader (KEY=VALUE lines) — never overrides real env."""
+    if not ENV_FILE.is_file():
+        return
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip())
+
 
 def _cred(name: str) -> str:
     value = os.environ.get(name, "")
-    if not value:
-        print(f"missing env var {name} — set it locally, never commit it")
+    if not value or value.startswith("your-"):
+        print(f"missing credential: set {name} in .env or environment")
         sys.exit(2)
     return value
 
@@ -46,6 +58,7 @@ async def try_login(client: FcClient, host: str, path: str, payload: dict) -> di
 
 
 async def main() -> None:
+    load_env_file()
     phone = _cred("FC_PHONE")
     cc = os.environ.get("FC_CC", "34")
     password = _cred("FC_PASSWORD")
@@ -92,4 +105,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    load_env_file()
     asyncio.run(main())
