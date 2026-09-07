@@ -1,10 +1,23 @@
-"""Endpoint registry: defaults, overrides file, candidate probing.
+"""Endpoint registry: defaults extracted from the real APK, overrides, probing.
 
-The FC SmartHome app (Shenzhen Fingerchip) cloud endpoints are not publicly
-documented. Defaults below are working hypotheses that MUST be confirmed with
-a mitmproxy capture of the official app (see tools/HARVEST.md). Users can
-override any path/host without touching code via a JSON file, and the probe
-tool (tools/probe_endpoints.py) records which candidates actually answer.
+Values below were extracted from the official FC SmartHome APK 4.6.6
+(com.fingercrystal.smarthome, resources.arsc string table):
+
+    fingercrystal_server        = www.fcsmartlock.com   (production)
+    fingercrystal_gatewayPort   = 443
+    fingercrystal_appSystemPort = 443
+    fingercrystal119_server     = test.fcsmartlock.com  (test channel)
+    fingercrystaltest2_server   = test2.fcsmartlock.com
+    fingercrystal_amazon_server = 18.219.242.80        (AWS intl channel)
+    fingercrystal_image_base_url = http://www.fcsmartlock.com:8060/images/
+
+The mobile API is Spring Boot behind nginx on 443 (confirmed live:
+Spring JSON 404 mapper on https://www.fcsmartlock.com). The gateway
+routes /api/* to the backend service (502 while the upstream is down).
+
+Path defaults remain candidates until a runtime capture pins them
+(tools/HARVEST.md); the EndpointRegistry still accepts JSON overrides
+and auto-discovery for anything that changes.
 """
 
 from __future__ import annotations
@@ -16,10 +29,15 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_REGIONS: dict[str, str] = {
-    "us": "https://api.fingercrystal.com",
-    "eu": "https://api-eu.fingercrystal.com",
-    "cn": "https://api-cn.fingercrystal.com",
-    "ru": "https://api-ru.fingercrystal.com",
+    # extracted from APK resources.arsc (production channel)
+    "us": "https://www.fcsmartlock.com",
+    "eu": "https://www.fcsmartlock.com",
+    "cn": "https://www.fcsmartlock.com",
+    "ru": "https://www.fcsmartlock.com",
+    # alternate channels found in the APK
+    "intl-aws": "https://18.219.242.80",
+    "test": "https://test.fcsmartlock.com",
+    "test2": "https://test2.fcsmartlock.com",
 }
 
 DEFAULT_PATHS: dict[str, str] = {
@@ -67,6 +85,9 @@ DEFAULT_BLE: dict[str, Any] = {
 }
 
 OVERRIDE_FILENAMES = ("fc_smarthome_endpoints.json", "fc_endpoints.json")
+
+# APK-extracted image/asset base (for face photos, avatars)
+IMAGE_BASE_URL = "http://www.fcsmartlock.com:8060/images/"
 
 VERIFIED_KEYS: set[str] = set()
 

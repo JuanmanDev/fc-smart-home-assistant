@@ -37,12 +37,14 @@ app for everything you'd want from a home-automation hub:
 | Fingerprint enrollment | ✅ | | `fc_smarthome.enroll_fingerprint` |
 | Real-time push events | history-delta | ✅ push | `event.*` entity + `fc_smarthome_event` bus event |
 
-> **Status: protocol hypotheses.** The vendor cloud is undocumented. Hosts,
-> paths, field aliases and the `devStatus` bitmask ship as working defaults
-> and are overridable in a JSON file **without touching code**. Follow
-> [`tools/HARVEST.md`](tools/HARVEST.md) (mitmproxy + BLE HCI snoop) to confirm
-> them against the official app — a 30–60 min job on your own hardware. See
-> [Verification status](#verification-status).
+> **Status: endpoints extracted from the real APK.** The production server
+> (`www.fcsmartlock.com:443`), channels (test/test2/AWS-intl), image base URL
+> and the vendor's web crypto (AES-ECB key, `token:` header, `{"result":1}`
+> envelope, HTTP 672 rate-limit) were all extracted from FC SmartHome APK
+> 4.6.6 (resources.arsc + vendor web bundle) — the app is SecNeo-packed, so
+> the exact REST paths are confirmed live but their per-call shapes still
+> benefit from a quick capture (tools/HARVEST.md). JSON overrides remain
+> supported for drift, plus `fcctl discover` runtime self-configuration.
 
 ## Install
 
@@ -218,11 +220,19 @@ Options → *FC SmartHome*:
 
 | Layer | State |
 |---|---|
-| Region hosts | hypothesis — run `fcctl probe`, confirm in mitmproxy |
-| REST paths/fields | hypothesis — generous alias matching; override JSON supported |
-| `devStatus` bitmask | hypothesis — XOR-diff method in HARVEST.md |
-| BLE framing/UUIDs | hypothesis — verify from HCI snoop |
-| Event pipeline | history-delta polling (works today); WS/MQTT push hooks exist in the registry |
+| Production host `www.fcsmartlock.com:443` | **extracted from APK**, live-confirmed (Spring Boot behind nginx) |
+| Channels: test/test2/AWS `18.219.242.80`/SaaS `iot.qspms.cn` | **extracted from APK** |
+| Image base `http://www.fcsmartlock.com:8060/images/` | **extracted from APK** |
+| Auth: `token:` header, AES-ECB key, `{"result":1}` envelope, HTTP 672 | **extracted from vendor web bundle** (fingercrystal.com/js) |
+| App platform | Alibaba IoT stack: OpenAccount SDK, LinkVisual, SecurityGuard, React Native |
+| REST subpaths under `/api/` | live backend currently 502; candidates shipped + `fcctl discover` probes |
+| BLE framing/UUIDs | auto-negotiated at connect (scan → learn services → pair) |
+
+The app ships SecNeo-packed with 4 encrypted DEXes inside `assets/0OO00l111l1l`;
+native libs (libsgmain/liblinkvisual/libIVIEWS) confirmed the Alibaba stack.
+Because the app needs no config file, neither does this library: correct hosts
+are compiled in as defaults, `fcctl discover` verifies them at runtime, and any
+override JSON is optional.
 
 Everything ships with the override system precisely so a first mitmproxy
 session makes it *fully real* without a code change. Contributions of captured

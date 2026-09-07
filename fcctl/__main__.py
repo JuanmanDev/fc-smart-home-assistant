@@ -309,6 +309,49 @@ async def cmd_probe_endpoints(args) -> None:
     out_json(results)
 
 
+async def cmd_discover(args) -> None:
+    """Self-configuration: discover cloud endpoints + BLE locks, no JSON needed."""
+    from custom_components.fc_smarthome.api.discovery import (
+        discover_login_endpoint,
+        resolve_candidate_ips,
+    )
+
+    print("Resolving candidate hosts...")
+    ips = resolve_candidate_ips()
+    for host, ip in ips.items():
+        print(f"  {host} -> {ip or 'NXDOMAIN'}")
+    print("\nProbing for the FC login endpoint (vendor envelope + crypto)...")
+    discovery = await discover_login_endpoint()
+    if discovery and discovery.get("host"):
+        print(f"\nFOUND: {discovery['host']}{discovery['login_path']}")
+        print(f"  status={discovery['status']} body={discovery.get('body', '')[:120]}")
+        # persist so future runs use it automatically
+        from custom_components.fc_smarthome.api.discovery import save_cached
+
+        save_cached(discovery)
+        print("  saved to ~/.fcsmarthome/discovered.json (auto-used by fcctl/HA)")
+    else:
+        probes = (discovery or {}).get("probes", [])
+        print(f"\nNo confirmed endpoint yet ({len(probes)} probes).")
+        print("Next: capture the app traffic (tools/HARVEST.md) to pin the host.")
+
+    if args.ble:
+        print("\nScanning Bluetooth for locks (self-configuring)...")
+        try:
+            from custom_components.fc_smarthome.local.ble import FcBleManager, BleConfig
+
+            registry = EndpointRegistry.load(args.region)
+            manager = FcBleManager(BleConfig.from_registry(registry.ble))
+            found = await manager.scan(timeout=args.ble_timeout, broad=True)
+            for d in found:
+                mark = " [likely lock]" if d.get("possibly_lock") else ""
+                print(f"  {d['address']}  {d['name']}{mark} rssi={d.get('rssi')}")
+            if not found:
+                print("  no BLE devices found")
+        except Exception as err:  # noqa: BLE001
+            print(f"  BLE scan unavailable: {err}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fcctl",
@@ -316,7 +359,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--email", help="account email (or FC_EMAIL)")
     parser.add_argument("--password", help="account password (or FC_PASSWORD)")
-    parser.add_argument("--region", default="us", choices=["us", "eu", "cn", "ru"])
+    parser.add_argument(
+        "--region",
+        default="us",
+        choices=["us", "eu", "cn", "ru", "intl-aws", "test", "test2"],
+        help="server channel (from the official app: us/eu/cn/ru -> www.fcsmartlock.com, intl-aws -> 18.219.242.80, test/test2)",
+    )
     parser.add_argument("--endpoints-file", help="endpoints override JSON path")
     parser.add_argument("--use-stored", action="store_true", help="reuse tokens from ~/.fcsmarthome/tokens.json")
     parser.add_argument("--debug", action="store_true", help="verbose logging")
@@ -422,6 +470,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("probe", help="probe cloud endpoint candidates")
     p.add_argument("--endpoints-file")
     p.set_defaults(func=cmd_probe_endpoints)
+
+    p = sub.add_parser(
+        "discover",
+        help="self-configure: find cloud endpoints (+ BLE locks) with no JSON",
+    )
+    p.add_argument("--ble", action="store_true", help="also scan Bluetooth")
+    p.add_argument("--ble-timeout", type=float, default=10.0)
+    p.set_defaults(func=cmd_discover)
 
     return parser
 

@@ -31,16 +31,26 @@ from .models import (
     parse_ts,
 )
 from .const import DEVICE_STATUS_MASKS, UNLOCK_METHOD_LABELS, USER_TYPE_INT_MAP
+from .discovery import APP_VERSION, VENDOR_AES_KEY, try_aes_decrypt, try_aes_encrypt
 
 _LOGGER = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = 1.5
 REQUEST_TIMEOUT = 15
+RATE_LIMIT_STATUS = 672  # vendor-specific: too many requests, retry in 3 min
 
 
 class FcClient:
-    """Low-level cloud client: auth, transport, endpoints, retries."""
+    """Low-level cloud client: auth, transport, endpoints, retries.
+
+    Protocol details mirror the vendor's own stack (ZHIXIN web platform):
+    - auth header: ``token: <hex>`` (not Bearer)
+    - response envelope: ``{"result": 1, "data": ..., "message": ...}``
+      where result==1 means success
+    - optional AES-ECB/PKCS7 payload crypto with the vendor web key
+    - HTTP 672 = vendor rate limit (wait ~3 minutes)
+    """
 
     def __init__(
         self,
@@ -50,6 +60,7 @@ class FcClient:
         endpoints: EndpointRegistry | None = None,
         session: aiohttp.ClientSession | None = None,
         on_token_refreshed: Callable[[TokenPair], None] | None = None,
+        use_vendor_crypto: bool = True,
     ) -> None:
         self.email = email
         self._password = password
@@ -61,6 +72,7 @@ class FcClient:
         self._on_token_refreshed = on_token_refreshed
         self._user_cache: dict[str, dict[str, LockUser]] = {}
         self._last_events: dict[str, list[LockEvent]] = {}
+        self._use_vendor_crypto = use_vendor_crypto
 
     # ---------- transport ----------
 
@@ -77,10 +89,12 @@ class FcClient:
         return {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "FCSmartHome/25.7.17 (Android 15; integration)",
+            "User-Agent": f"FCSmartHome/{APP_VERSION} (Android 15)",
+            "timezone": "0",  # minutes offset, like the web app
+            "version": "1.0.4R",
+            "Accept-Language": "en",
             "X-Platform": "android",
-            "X-App-Version": "25.7.17",
-            "X-Language": "en",
+            "X-App-Version": APP_VERSION,
         }
 
     async def close(self) -> None:
@@ -98,11 +112,12 @@ class FcClient:
         retries: int = MAX_RETRIES,
     ) -> Any:
         session = await self._ensure_session()
-        headers = {}
+        headers: dict[str, str] = {}
         if auth:
             if not self.tokens or not self.tokens.access_token:
                 raise FcAuthError("Not logged in")
-            headers["Authorization"] = f"Bearer {self.tokens.access_token}"
+            # vendor stack uses a plain `token:` header (ZHIXIN web app)
+            headers["token"] = self.tokens.access_token
         last_error: Exception | None = None
         for attempt in range(retries):
             try:
@@ -110,7 +125,7 @@ class FcClient:
                     method, url, json=payload, params=params, headers=headers
                 ) as resp:
                     body_text = await resp.text()
-                    if resp.status in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                    if resp.status in (429, RATE_LIMIT_STATUS, 500, 502, 503, 504) and attempt < retries - 1:
                         await asyncio.sleep(min(RETRY_BACKOFF**attempt, 8))
                         continue
                     try:
@@ -125,9 +140,20 @@ class FcClient:
                             code=resp.status,
                             payload=body,
                         )
-                    # Chinese IoT clouds commonly answer HTTP 200 with an
-                    # error envelope: {"code": 1001, "msg": "token expired"}
                     if isinstance(body, dict):
+                        # ZHIXIN envelope: {"result":1|0, "data":..., "message":...}
+                        if "result" in body:
+                            if body.get("result") != 1:
+                                msg = str(body.get("message") or body_text[:200])
+                                if "token" in msg.lower() or body.get("result") in (672, 401, 1001):
+                                    raise FcAuthError(f"API result {body.get('result')}: {msg}")
+                                raise FcApiError(
+                                    f"API result {body.get('result')}: {msg}",
+                                    code=body.get("result") if isinstance(body.get("result"), int) else resp.status,
+                                    payload=body,
+                                )
+                            return body
+                        # fallback: generic Chinese-cloud code envelope
                         err_code = body.get("code")
                         if err_code is None:
                             err_code = body.get("errcode")
@@ -154,13 +180,33 @@ class FcClient:
     # ---------- auth ----------
 
     async def login(self) -> TokenPair:
+        """Login; on unknown-host/404, self-configure via discovery first."""
+        try:
+            return await self._login_once()
+        except (FcConnectionError, FcApiError) as err:
+            _LOGGER.debug("login failed on current endpoints (%s); trying discovery", err)
+            from .discovery import auto_configure
+
+            registry = await auto_configure(self.endpoints)
+            if registry.source_file == "discovered":
+                return await self._login_once()
+            raise
+
+    async def _login_once(self) -> TokenPair:
         payload = {
             "email": self.email,
             "password": self._password,
             "platform": "android",
-            "app_version": "25.7.17",
-            "device_name": "home-assistant",
+            "appVersion": APP_VERSION,
+            "deviceName": "home-assistant",
         }
+        # The vendor web stack encrypts the password with the shared
+        # AES-ECB key; many endpoints require it, plain JSON for others.
+        if self._use_vendor_crypto:
+            encrypted = try_aes_encrypt(self._password)
+            if encrypted:
+                payload["password"] = encrypted
+                payload["encryptType"] = "aes"
         body = await self._request(
             "POST", self.endpoints.url("login"), payload=payload, auth=False
         )

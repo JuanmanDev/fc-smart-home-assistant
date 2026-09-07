@@ -29,7 +29,11 @@ STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_EMAIL): str,
         vol.Required(CONF_PASSWORD): str,
-        vol.Optional(CONF_REGION, default="us"): vol.In(["us", "eu", "cn", "ru"]),
+        vol.Optional(
+            CONF_REGION,
+            default="us",
+            description="Server channel (extracted from the official app)",
+        ): vol.In(["us", "eu", "cn", "ru", "intl-aws", "test", "test2"]),
         vol.Optional(CONF_ENDPOINTS_FILE, default=""): str,
     }
 )

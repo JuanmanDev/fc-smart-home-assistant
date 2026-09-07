@@ -5,6 +5,7 @@ Self-contained (no Home Assistant imports) so the same code powers the
 """
 
 from .client import FcClient
+from .discovery import auto_configure, discover_login_endpoint, resolve_candidate_ips
 from .endpoints import DEFAULT_REGIONS, EndpointRegistry
 from .errors import (
     FcApiError,
@@ -30,6 +31,9 @@ __all__ = [
     "FcClient",
     "EndpointRegistry",
     "DEFAULT_REGIONS",
+    "auto_configure",
+    "discover_login_endpoint",
+    "resolve_candidate_ips",
     "FcError",
     "FcApiError",
     "FcAuthError",

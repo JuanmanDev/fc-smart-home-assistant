@@ -200,6 +200,43 @@ def test_ble_frame_short():
     assert parse_frame(b"FCF") is None
 
 
+# ---------- APK-extracted production config (self-configuration) ----------
+
+
+def test_apk_extracted_production_server():
+    """The registry defaults must match the values extracted from the APK."""
+    reg = EndpointRegistry.load("us")
+    assert reg.base_url == "https://www.fcsmartlock.com"
+    assert reg.regions["intl-aws"] == "https://18.219.242.80"
+    assert reg.regions["test"] == "https://test.fcsmartlock.com"
+    assert reg.url("login").startswith("https://www.fcsmartlock.com/api/")
+
+
+def test_discovery_candidates_prioritize_apk_host():
+    from custom_components.fc_smarthome.api.discovery import CANDIDATE_HOSTS
+
+    assert CANDIDATE_HOSTS[0] == "https://www.fcsmartlock.com"
+
+
+def test_aes_vendor_crypto_roundtrip():
+    from custom_components.fc_smarthome.api.discovery import (
+        VENDOR_AES_KEY,
+        try_aes_decrypt,
+        try_aes_encrypt,
+    )
+
+    try:
+        from Crypto.Cipher import AES  # noqa: F401
+    except ImportError:
+        import pytest
+
+        pytest.skip("pycryptodome not installed")
+    assert len(VENDOR_AES_KEY) == 32
+    ct = try_aes_encrypt("hello fc")
+    assert ct is not None
+    assert try_aes_decrypt(ct) == "hello fc"
+
+
 # ---------- coordinator-level event plumbing (pure logic) ----------
 
 

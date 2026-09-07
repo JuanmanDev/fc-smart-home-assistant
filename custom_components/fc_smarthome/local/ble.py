@@ -124,13 +124,40 @@ class FcBleTransport:
         client = BleakClient(self.device)
         await asyncio.wait_for(client.connect(), timeout=self.config.connect_timeout)
         self._client = client
-        try:
+        # self-configuration: negotiate the real characteristics on the fly
+        await self._negotiate_characteristics()
+        await self._pair()
+
+    async def _negotiate_characteristics(self) -> None:
+        """Learn write/notify characteristics from the device (no static map).
+
+        Preference: (a) the configured UUIDs if present, (b) else pick the
+        first write + notify characteristics found on any service.
+        """
+        services = self._client.services
+        if services is None:
+            return
+        write_uuid = self.config.write_characteristic
+        notify_uuid = self.config.notify_characteristic
+        have_write = any(c.uuid.lower() == write_uuid.lower() for s in services for c in s.characteristics)
+        have_notify = any(c.uuid.lower() == notify_uuid.lower() for s in services for c in s.characteristics)
+        if not (have_write and have_notify):
+            for service in services:
+                for char in service.characteristics:
+                    props = char.properties
+                    if not have_write and ("write" in props or "write-without-response" in props):
+                        write_uuid = char.uuid
+                        have_write = True
+                    if not have_notify and "notify" in props:
+                        notify_uuid = char.uuid
+                        have_notify = True
+        self.config.write_characteristic = write_uuid
+        self.config.notify_characteristic = notify_uuid
+        if have_notify:
             char = await self._find_notify_characteristic()
             if char is not None:
-                await client.start_notify(char, self._on_notify)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Notify subscription failed: %s", err)
-        await self._pair()
+                with contextlib.suppress(Exception):
+                    await self._client.start_notify(char, self._on_notify)
 
     async def _find_notify_characteristic(self):
         services = self._client.services
@@ -273,7 +300,12 @@ class FcBleTransport:
 
 
 class FcBleManager:
-    """Scanner + per-device transports with auto reconnect."""
+    """Scanner + per-device transports with auto self-configuration.
+
+    Like the app: no static config needed. On first use we scan, learn
+    which advertised services the lock exposes (fallback to any
+    notifiable characteristic), and cache the working UUIDs.
+    """
 
     def __init__(self, config: BleConfig) -> None:
         self.config = config
@@ -281,26 +313,37 @@ class FcBleManager:
         self._discovered: dict[str, "BLEDevice"] = {}
         self._lock = asyncio.Lock()
 
-    async def scan(self, timeout: float = 10.0) -> list[dict]:
+    async def scan(self, timeout: float = 10.0, broad: bool = False) -> list[dict]:
+        """Scan for locks. With broad=True, match by advertised services
+        instead of name prefixes (self-configuration when names differ)."""
         if BLE_IMPORT_ERROR:
             raise FcLocalError(f"bleak is not installed: {BLE_IMPORT_ERROR}")
-        prefixes = tuple(p.lower() for p in self.config.name_prefixes)
-        wanted_uuid = self.config.service_uuid.lower()
+        prefixes = tuple(p.lower() for p in self.config.name_prefixes) if not broad else ()
         found: list[dict] = []
         devices = await BleakScanner.discover(timeout=timeout)
         for dev in devices:
-            uuids = [str(u).lower() for u in (dev.details.get("uuids") or [])] if isinstance(dev.details, dict) else []
+            adv = dev.details if isinstance(dev.details, dict) else {}
+            uuids = [str(u).lower() for u in (adv.get("uuids") or [])]
             name = (dev.name or "").lower()
             if prefixes and not name.startswith(prefixes):
                 continue
-            if wanted_uuid and wanted_uuid not in uuids and not name.startswith(prefixes):
+            local_names = [
+                str(d).lower() for d in (adv.get("local_name"), dev.name or "")
+                if d
+            ]
+            looks_like_lock = any(
+                n for n in local_names if any(k in n for k in ("lock", "fc", "yi", "el", "dz", "k3", "safe"))
+            )
+            if broad and not (uuids or looks_like_lock):
                 continue
             self._discovered[dev.address] = dev
             found.append(
                 {
                     "address": dev.address,
                     "name": dev.name,
-                    "rssi": dev.details.get("rssi") if isinstance(dev.details, dict) else None,
+                    "rssi": adv.get("rssi"),
+                    "uuids": uuids,
+                    "possibly_lock": looks_like_lock,
                 }
             )
         return found
