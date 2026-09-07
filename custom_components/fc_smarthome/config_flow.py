@@ -16,6 +16,7 @@ from .const import (
     CONF_EMAIL,
     CONF_ENDPOINTS_FILE,
     CONF_LOCAL_BLE,
+    CONF_LOCAL_LAN,
     CONF_PASSWORD,
     CONF_POLL_INTERVAL,
     CONF_REGION,
@@ -134,6 +135,10 @@ class FCSmartHomeOptionsFlow(OptionsFlow):
                         CONF_POLL_INTERVAL,
                         default=current.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL),
                     ): vol.All(vol.Coerce(int), vol.Range(min=15, max=3600)),
+                    vol.Optional(
+                        CONF_LOCAL_LAN,
+                        default=current.get(CONF_LOCAL_LAN, True),
+                    ): bool,
                     vol.Optional(
                         CONF_LOCAL_BLE,
                         default=current.get(CONF_LOCAL_BLE, False),

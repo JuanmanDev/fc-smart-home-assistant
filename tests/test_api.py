@@ -379,7 +379,71 @@ def test_platforms_constant_shape():
     assert "sensor" in PLATFORMS
 
 
-# ---------- HTTP-200 error envelope handling ----------
+# ---------- LAN transport (framing shared with BLE) ----------
+
+
+def test_lan_module_imports():
+    from custom_components.fc_smarthome.local.lan import LanConfig
+
+    from custom_components.fc_smarthome.local.router import FcTransportRouter  # noqa: F401
+
+    cfg = LanConfig()
+    assert cfg.coap_port == 5683
+    assert 8060 in cfg.tcp_ports
+
+
+def test_lan_config_from_registry():
+    from custom_components.fc_smarthome.local.lan import LanConfig
+
+    cfg = LanConfig.from_registry({"coap_port": 5683, "tcp_ports": [9999]})
+    assert cfg.coap_port == 5683
+    assert cfg.tcp_ports == [9999]
+
+
+@pytest.mark.asyncio
+async def test_router_falls_back_to_cloud():
+    """Router with no local channels routes straight to cloud."""
+    from custom_components.fc_smarthome.local.router import FcTransportRouter
+    from custom_components.fc_smarthome.api.models import ControlResult
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        async def unlock(self, device_id, reason="app"):
+            self.calls.append("unlock")
+            return ControlResult(success=True, message="cloud")
+
+        async def lock(self, device_id):
+            self.calls.append("lock")
+            return ControlResult(success=True, message="cloud")
+
+        async def latch(self, device_id):
+            self.calls.append("latch")
+            return ControlResult(success=True, message="cloud")
+
+        async def beep(self, device_id):
+            self.calls.append("beep")
+            return ControlResult(success=True, message="cloud")
+
+    fake = FakeClient()
+    router = FcTransportRouter(fake, ble_manager=None, lan_hosts={})
+    result = await router.unlock("dev1")
+    assert result.success
+    assert fake.calls == ["unlock"]
+    result = await router.beep("dev1")
+    assert result.success
+    assert fake.calls == ["unlock", "beep"]
+
+
+@pytest.mark.asyncio
+async def test_lan_transport_frame_roundtrip():
+    """FCFC framing works for the LAN channel identically to BLE."""
+    frame = build_frame(0x10, b"000000", seq=3)
+    parsed = parse_frame(frame)
+    assert parsed is not None
+    cmd, seq, payload = parsed
+    assert (cmd, seq, payload) == (0x10, 3, b"000000")
 
 
 class _FakeResp:

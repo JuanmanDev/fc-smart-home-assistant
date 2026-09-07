@@ -13,6 +13,7 @@ CONF_PASSWORD = "password"
 CONF_REGION = "region"
 CONF_POLL_INTERVAL = "poll_interval"
 CONF_LOCAL_BLE = "local_ble"
+CONF_LOCAL_LAN = "local_lan"
 CONF_ENDPOINTS_FILE = "endpoints_file"
 
 DEFAULT_POLL_INTERVAL = 30

@@ -301,6 +301,42 @@ async def cmd_ble_status(args) -> None:
     await manager.close()
 
 
+async def cmd_lan_discover(args) -> None:
+    """Discover FC/Alink devices on the local network (mDNS + UDP)."""
+    from custom_components.fc_smarthome.local.lan import discover_lan_devices, probe_coap
+
+    found = await discover_lan_devices(timeout=args.timeout)
+    out_json(found)
+    for d in found:
+        if d["source"] == "udp-broadcast":
+            result = await probe_coap(d["ip"])
+            if result:
+                print(f"Alink CoAP confirmed at {result['ip']} code={result['coap_code']}")
+
+
+async def cmd_lan_unlock(args) -> None:
+    """Unlock a lock over the LAN (WiFi lock / gateway TCP channel)."""
+    from custom_components.fc_smarthome.local.lan import FcLanTransport, LanConfig
+    from custom_components.fc_smarthome.api.endpoints import EndpointRegistry
+
+    registry = EndpointRegistry.load(getattr(args, "region", "us"))
+    config = LanConfig.from_registry(registry.lan, pair_code=args.pair_code)
+    transport = FcLanTransport(args.host, args.port, config)
+    await transport.connect()
+    await transport.pair()
+    await transport.unlock()
+    print(f"Unlock command sent over LAN to {args.host}:{args.port}.")
+    await transport.disconnect()
+
+
+async def cmd_lan_scan_ports(args) -> None:
+    """Find the TCP command port on a gateway/lock host."""
+    from custom_components.fc_smarthome.local.lan import find_open_command_port
+
+    port = await find_open_command_port(args.host)
+    print(f"{args.host}: command port = {port}" if port else f"{args.host}: no known port open")
+
+
 async def cmd_probe_endpoints(args) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
     from probe_endpoints import probe_all  # noqa: E402
@@ -466,6 +502,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("address")
     p.add_argument("--pair-code")
     p.set_defaults(func=cmd_ble_status)
+
+    p = sub.add_parser("lan-discover", help="discover FC/Alink devices on the LAN")
+    p.add_argument("--timeout", type=float, default=5.0)
+    p.set_defaults(func=cmd_lan_discover)
+
+    p = sub.add_parser("lan-unlock", help="unlock a lock over local LAN/TCP")
+    p.add_argument("host")
+    p.add_argument("--port", type=int, default=8060)
+    p.add_argument("--pair-code")
+    p.set_defaults(func=cmd_lan_unlock)
+
+    p = sub.add_parser("lan-ports", help="find the TCP command port on a host")
+    p.add_argument("host")
+    p.set_defaults(func=cmd_lan_scan_ports)
 
     p = sub.add_parser("probe", help="probe cloud endpoint candidates")
     p.add_argument("--endpoints-file")

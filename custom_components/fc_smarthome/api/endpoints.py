@@ -84,6 +84,13 @@ DEFAULT_BLE: dict[str, Any] = {
     "magic": "FCFC",
 }
 
+DEFAULT_LAN: dict[str, Any] = {
+    "coap_port": 5683,
+    "tcp_ports": [8060, 9999, 8666, 5683],
+    "mdns_services": ["_alink._udp.local.", "_fcsmart._tcp.local."],
+    "enabled": True,
+}
+
 OVERRIDE_FILENAMES = ("fc_smarthome_endpoints.json", "fc_endpoints.json")
 
 # APK-extracted image/asset base (for face photos, avatars)
@@ -100,6 +107,7 @@ class EndpointRegistry:
     websocket: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_WEBSOCKET))
     mqtt: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_MQTT))
     ble: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_BLE))
+    lan: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_LAN))
     source_file: str | None = None
 
     @classmethod
@@ -136,6 +144,9 @@ class EndpointRegistry:
             ble = dict(reg.ble)
             ble.update(data.get("ble") or {})
             reg.ble = ble
+            lan = dict(reg.lan)
+            lan.update(data.get("lan") or {})
+            reg.lan = lan
             reg.source_file = source
             reg.paths = {k: v for k, v in reg.paths.items() if v is not None}
         return reg

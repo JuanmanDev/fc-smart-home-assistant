@@ -1,4 +1,4 @@
-"""Lock platform: lock/unlock/latch with attribute-rich state."""
+"""Lock platform: lock/unlock/latch local-first (LAN -> BLE -> cloud)."""
 
 from __future__ import annotations
 
@@ -17,8 +17,9 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass, entry, async_add_entities):
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator = data["coordinator"]
+    router = data.get("router")
     entities = [
-        FCLock(coordinator, device_id)
+        FCLock(coordinator, device_id, router)
         for device_id, device in coordinator.devices.items()
         if device.is_lock or device.is_doorbell
     ]
@@ -32,9 +33,12 @@ class FCLock(CoordinatorEntity, LockEntity):
     _attr_name = None
     _attr_code_format = None
 
-    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+    def __init__(
+        self, coordinator: FcCoordinator, device_id: str, router=None
+    ) -> None:
         super().__init__(coordinator)
         self.device_id = device_id
+        self.router = router
         device = coordinator.devices[device_id]
         self._attr_unique_id = f"{device_id}_lock"
         self._attr_device_info = DeviceInfo(
@@ -78,20 +82,35 @@ class FCLock(CoordinatorEntity, LockEntity):
             attrs["last_event"] = last.to_dict()
         return attrs
 
-    async def async_lock(self, **kwargs):
-        result = await self.coordinator.client.lock(self.device_id)
+    async def _control(self, cloud_call, local_call=None):
+        if local_call is not None:
+            try:
+                result = await local_call()
+                if result.success:
+                    await self.coordinator.async_request_refresh()
+                    return
+                _LOGGER.warning("local control failed (%s), trying cloud", result.message)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("local control error (%s), trying cloud", err)
+        result = await cloud_call()
         if not result.success:
-            _LOGGER.error("Lock command failed: %s", result.message)
+            _LOGGER.error("Control command failed: %s", result.message)
         await self.coordinator.async_request_refresh()
+
+    async def async_lock(self, **kwargs):
+        await self._control(
+            lambda: self.coordinator.client.lock(self.device_id),
+            (lambda: self.router.lock(self.device_id)) if self.router else None,
+        )
 
     async def async_unlock(self, **kwargs):
-        result = await self.coordinator.client.unlock(self.device_id, reason="app")
-        if not result.success:
-            _LOGGER.error("Unlock command failed: %s", result.message)
-        await self.coordinator.async_request_refresh()
+        await self._control(
+            lambda: self.coordinator.client.unlock(self.device_id, reason="app"),
+            (lambda: self.router.unlock(self.device_id)) if self.router else None,
+        )
 
     async def async_open(self, **kwargs):
-        result = await self.coordinator.client.latch(self.device_id)
-        if not result.success:
-            _LOGGER.error("Latch/open command failed: %s", result.message)
-        await self.coordinator.async_request_refresh()
+        await self._control(
+            lambda: self.coordinator.client.latch(self.device_id),
+            (lambda: self.router.latch(self.device_id)) if self.router else None,
+        )

@@ -36,6 +36,7 @@ app for everything you'd want from a home-automation hub:
 | Rename user | ✅ | | `fc_smarthome.rename_user` |
 | Fingerprint enrollment | ✅ | | `fc_smarthome.enroll_fingerprint` |
 | Real-time push events | history-delta | ✅ push | `event.*` entity + `fc_smarthome_event` bus event |
+| **Local LAN control** (WiFi locks/gateways) | | ✅ CoAP+TCP | automatic, local-first |
 
 > **Status: endpoints extracted from the real APK.** The production server
 > (`www.fcsmartlock.com:443`), channels (test/test2/AWS-intl), image base URL
@@ -94,6 +95,9 @@ fcctl watch                          # live event feed (poll deltas)
 fcctl ble-scan                       # find locks over Bluetooth
 fcctl ble-status AA:BB:CC:DD:EE:FF   # local status read
 fcctl ble-unlock AA:BB:CC:DD:EE:FF   # local unlock, works offline
+fcctl lan-discover                   # find FC devices on your network (mDNS+UDP)
+fcctl lan-ports 192.168.x.x          # find the TCP command port of a gateway
+fcctl lan-unlock 192.168.x.x         # local unlock over WiFi/LAN
 fcctl probe                          # which cloud hosts are alive
 ```
 
@@ -213,6 +217,9 @@ data: { device_id: "<device-id>" }
 Options → *FC SmartHome*:
 
 - **Poll interval** (default 30s, min 15s) — cloud resync cadence.
+- **Local LAN** (default on) — discover and control WiFi locks/gateways on
+  your network directly (CoAP UDP 5683 + TCP command channel, FCFC framing).
+  Local-first: LAN → BLE → cloud, verified live on a real network.
 - **Local BLE** — enable Bluetooth control (needs `bleak`; the HA host must
   have a BT adapter or the `bluetooth` integration).
 

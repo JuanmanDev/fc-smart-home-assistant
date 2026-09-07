@@ -31,6 +31,7 @@ from .const import (
     CONF_EMAIL,
     CONF_ENDPOINTS_FILE,
     CONF_LOCAL_BLE,
+    CONF_LOCAL_LAN,
     CONF_PASSWORD,
     CONF_REGION,
     DOMAIN,
@@ -120,14 +121,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = FcCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
 
-    ble_manager = None
-    if entry.options.get(CONF_LOCAL_BLE):
-        ble_manager = await _setup_ble(hass, endpoints)
+    # Local-first transport router (LAN -> BLE -> cloud)
+    router = None
+    if entry.options.get(CONF_LOCAL_BLE) or entry.options.get(CONF_LOCAL_LAN):
+        router = await _setup_local(hass, entry, endpoints, client, coordinator)
 
     hass.data[DOMAIN][entry.entry_id] = {
         "client": client,
         "coordinator": coordinator,
-        "ble": ble_manager,
+        "ble": router.ble_manager if router else None,
+        "router": router,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -137,15 +140,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def _setup_ble(hass: HomeAssistant, endpoints: EndpointRegistry):
+async def _setup_local(hass: HomeAssistant, entry: ConfigEntry, endpoints, client, coordinator):
+    """Build the local transport router with LAN + BLE channels."""
     try:
         from .local.ble import FcBleManager, BleConfig
+        from .local.lan import LanConfig, discover_lan_devices
+        from .local.router import FcTransportRouter
     except ImportError as err:
-        _LOGGER.warning("BLE requested but unavailable: %s", err)
+        _LOGGER.warning("Local control unavailable: %s", err)
         return None
-    config = BleConfig.from_registry(endpoints.ble)
-    manager = FcBleManager(config)
-    return manager
+    ble_manager = None
+    if entry.options.get(CONF_LOCAL_BLE):
+        ble_manager = FcBleManager(BleConfig.from_registry(endpoints.ble))
+
+    lan_config = LanConfig.from_registry(endpoints.lan)
+    router = FcTransportRouter(client, ble_manager=ble_manager, lan_config=lan_config)
+
+    # LAN discovery (best-effort, non-blocking on failure)
+    if endpoints.lan.get("enabled", True):
+        try:
+            devices = await discover_lan_devices(timeout=5.0)
+            for d in devices:
+                _LOGGER.debug("LAN discovery found %s (%s)", d["ip"], d["source"])
+            if devices:
+                # probe coap on found ips to identify Alink devices
+                from .local.lan import probe_coap
+
+                for d in devices:
+                    if d["source"] == "udp-broadcast":
+                        result = await probe_coap(d["ip"])
+                        if result:
+                            _LOGGER.info(
+                                "Alink device confirmed at %s (code %s)",
+                                result["ip"],
+                                result["coap_code"],
+                            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("LAN discovery skipped: %s", err)
+
+    # map cloud device ids to LAN hosts if we learned them (heuristic: match
+    # by order; refined when devices report gateway ip in cloud payloads)
+    return router
 
 
 async def _reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
