@@ -337,6 +337,32 @@ async def cmd_lan_scan_ports(args) -> None:
     print(f"{args.host}: command port = {port}" if port else f"{args.host}: no known port open")
 
 
+async def cmd_lan_register(args) -> None:
+    """Register a LAN device with its Alink productKey/deviceName and verify it."""
+    from custom_components.fc_smarthome.local.lan import confirm_fc_device
+
+    info = await confirm_fc_device(args.host, args.product_key, args.device_name)
+    if info:
+        print(f"VERIFIED {args.host} as pk={args.product_key} dn={args.device_name}")
+        out_json(info)
+    else:
+        print(f"NOT verified: {args.host} did not answer an Alink RPC with pk/dn. "
+              "Check pk/dn (from the cloud device list or a capture).")
+
+
+async def cmd_alink_call(args) -> None:
+    """Raw Alink RPC to a LAN device (for protocol exploration)."""
+    from custom_components.fc_smarthome.local.alink import AlinkLanDevice
+
+    dev = AlinkLanDevice(
+        args.host,
+        product_key=args.product_key,
+        device_name=args.device_name,
+    )
+    result = await dev._rpc(args.method, json.loads(args.params) if args.params else {})
+    out_json(result)
+
+
 async def cmd_probe_endpoints(args) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
     from probe_endpoints import probe_all  # noqa: E402
@@ -516,6 +542,26 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("lan-ports", help="find the TCP command port on a host")
     p.add_argument("host")
     p.set_defaults(func=cmd_lan_scan_ports)
+
+    p = sub.add_parser(
+        "lan-register",
+        help="verify a LAN device with its Alink productKey/deviceName",
+    )
+    p.add_argument("host")
+    p.add_argument("--product-key", required=True)
+    p.add_argument("--device-name", required=True)
+    p.set_defaults(func=cmd_lan_register)
+
+    p = sub.add_parser(
+        "alink-call",
+        help="raw Alink RPC to a LAN device (protocol exploration)",
+    )
+    p.add_argument("host")
+    p.add_argument("--product-key", required=True)
+    p.add_argument("--device-name", required=True)
+    p.add_argument("--method", required=True, help="e.g. thing.deviceInfo.get")
+    p.add_argument("--params", default="{}")
+    p.set_defaults(func=cmd_alink_call)
 
     p = sub.add_parser("probe", help="probe cloud endpoint candidates")
     p.add_argument("--endpoints-file")

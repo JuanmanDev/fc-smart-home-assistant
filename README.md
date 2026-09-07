@@ -36,7 +36,7 @@ app for everything you'd want from a home-automation hub:
 | Rename user | ✅ | | `fc_smarthome.rename_user` |
 | Fingerprint enrollment | ✅ | | `fc_smarthome.enroll_fingerprint` |
 | Real-time push events | history-delta | ✅ push | `event.*` entity + `fc_smarthome_event` bus event |
-| **Local LAN control** (WiFi locks/gateways) | | ✅ CoAP+TCP | automatic, local-first |
+| **Local LAN control** (WiFi locks/gateways) | | candidates | Alink CoAP channel implemented; needs pk/dn from cloud or capture |
 
 > **Status: endpoints extracted from the real APK.** The production server
 > (`www.fcsmartlock.com:443`), channels (test/test2/AWS-intl), image base URL
@@ -218,22 +218,28 @@ Options → *FC SmartHome*:
 
 - **Poll interval** (default 30s, min 15s) — cloud resync cadence.
 - **Local LAN** (default on) — discover and control WiFi locks/gateways on
-  your network directly (CoAP UDP 5683 + TCP command channel, FCFC framing).
-  Local-first: LAN → BLE → cloud, verified live on a real network.
+  your network via the Alink CoAP protocol (UDP 5683). Requires the
+  device's productKey/deviceName (learned from the cloud device list, or
+  set via `fcctl lan-register`). Candidates are verified with a real
+  device RPC before entities are created — generic CoAP devices are not
+  misidentified (an early bug, fixed).
 - **Local BLE** — enable Bluetooth control (needs `bleak`; the HA host must
-  have a BT adapter or the `bluetooth` integration).
+  have a BT adapter near the lock).
 
 ## Verification status
 
 | Layer | State |
 |---|---|
-| Production host `www.fcsmartlock.com:443` | **extracted from APK**, live-confirmed (Spring Boot behind nginx) |
+| Production host `www.fcsmartlock.com:443` | **extracted from APK**, live (Spring Boot behind nginx; `/api/*` upstream currently 502) |
+| SaaS API `iot.qspms.cn/api/*` | **live**, returns vendor HTTP 692 signature gate — needs signed requests (Alibaba SecurityGuard) |
+| **Cloud TLS profile** | **live-verified**: TLS1.2 + legacy renegotiation + `AES128-SHA`; Python/aiohttp defaults rejected — client ships a matching connector (why the app bundles Alibaba `libitls`) |
 | Channels: test/test2/AWS `18.219.242.80`/SaaS `iot.qspms.cn` | **extracted from APK** |
 | Image base `http://www.fcsmartlock.com:8060/images/` | **extracted from APK** |
-| Auth: `token:` header, AES-ECB key, `{"result":1}` envelope, HTTP 672 | **extracted from vendor web bundle** (fingercrystal.com/js) |
+| Auth: `token:` header, AES-ECB key, `{"result":1}` envelope, HTTP 672/692 | **extracted from vendor web bundle** (fingercrystal.com/js) |
 | App platform | Alibaba IoT stack: OpenAccount SDK, LinkVisual, SecurityGuard, React Native |
-| REST subpaths under `/api/` | live backend currently 502; candidates shipped + `fcctl discover` probes |
-| BLE framing/UUIDs | auto-negotiated at connect (scan → learn services → pair) |
+| LAN CoAP channel | implemented (RFC 7252 codec + Alink RPCs); needs real pk/dn to authenticate — pending cloud/capture |
+| BLE channel | implemented + auto-negotiation; framing is hypothesis pending HCI capture |
+| Event pipeline | history-delta polling (works today); WS/MQTT push hooks exist in the registry |
 
 The app ships SecNeo-packed with 4 encrypted DEXes inside `assets/0OO00l111l1l`;
 native libs (libsgmain/liblinkvisual/libIVIEWS) confirmed the Alibaba stack.

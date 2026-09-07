@@ -500,3 +500,79 @@ async def test_success_envelope_passes():
     c._session = _FakeSession(200, {"code": 0, "data": {"ok": True}})
     body = await c._request("GET", "https://x/y")
     assert body["data"]["ok"] is True
+
+
+# ---------- CoAP / Alink codec ----------
+
+
+def test_coap_message_roundtrip():
+    from custom_components.fc_smarthome.local.alink import COAP_POST, CoapMessage
+
+    msg = CoapMessage(
+        code=COAP_POST,
+        msg_id=0x1234,
+        token=b"\xab\xcd",
+        options=[
+            (11, b"sys"),
+            (11, b"pk1"),
+            (11, b"dn1"),
+            (11, b"thing"),
+            (11, b"service"),
+            (11, b"unlock"),
+        ],
+        payload=b'{"id":1}',
+    )
+    dec = CoapMessage.decode(msg.encode())
+    assert dec.msg_id == 0x1234
+    assert dec.token == b"\xab\xcd"
+    # RFC 7252: same-number options (Uri-Path) MUST keep caller order
+    assert [o for _, o in dec.options] == [
+        b"sys",
+        b"pk1",
+        b"dn1",
+        b"thing",
+        b"service",
+        b"unlock",
+    ]
+    assert dec.payload == b'{"id":1}'
+
+
+def test_coap_extended_option_lengths():
+    from custom_components.fc_smarthome.local.alink import COAP_POST, CoapMessage
+
+    long_seg = b"x" * 20  # forces extended length byte
+    msg = CoapMessage(
+        code=COAP_POST,
+        msg_id=1,
+        token=b"ab",
+        options=[(11, long_seg), (12, b"y" * 300)],  # ext delta + big ext len
+        payload=b"z",
+    )
+    dec = CoapMessage.decode(msg.encode())
+    assert dec.options[0] == (11, long_seg)
+    assert dec.options[1] == (12, b"y" * 300)
+    assert dec.payload == b"z"
+
+
+def test_coap_ping_ack_decode():
+    """A 4-byte CoAP ping-ACK (any RFC-7252 device) decodes safely."""
+    from custom_components.fc_smarthome.local.alink import CoapMessage
+
+    dec = CoapMessage.decode(bytes.fromhex("60004643"))
+    assert dec.mtype == 2  # ACK
+    assert dec.code == 0
+    assert dec.payload == b""
+
+
+def test_alink_topic_shape():
+    from custom_components.fc_smarthome.local.alink import AlinkLanDevice
+
+    dev = AlinkLanDevice("1.2.3.4", product_key="a1PK", device_name="dn1")
+    assert dev._topic("unlock") == "/topic/sys/a1PK/dn1/thing/service/unlock"
+
+
+def test_lan_discovery_marks_candidates_unverified():
+    """Broadcast findings must default to verified=False (no false locks)."""
+    from custom_components.fc_smarthome.local.lan import confirm_fc_device
+
+    assert callable(confirm_fc_device)

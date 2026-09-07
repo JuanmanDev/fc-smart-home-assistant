@@ -74,13 +74,19 @@ class LanConfig:
 
 
 async def discover_lan_devices(timeout: float = DISCOVERY_TIMEOUT) -> list[dict]:
-    """Discover FC/Alink devices on the LAN.
+    """Discover candidate FC/Alink devices on the LAN.
 
-    Strategy (no external deps):
-    1. mDNS multicast query for Alink/FC service types (UDP 5353 -> 224.0.0.251)
-    2. Alink smart-config UDP probe on the broadcast address port 5683
-       (devices reply with their JSON id payload)
-    Returns a list of {ip, port, source, payload} dicts.
+    IMPORTANT: a raw FCFC UDP probe gets CoAP ping-ACKs from ANY RFC-7252
+    device (the 4-byte 'FC' payload is read as a message-id). Candidates
+    from broadcast are therefore UNVERIFIED and must pass
+    ``confirm_fc_device()`` (a real Alink RPC with the vendor's
+    productKey/deviceName) before being exposed to Home Assistant.
+
+    Strategy:
+    1. mDNS query for Alink/FC service types (UDP 5353 -> 224.0.0.251)
+    2. Alink smart-config JSON broadcast on UDP 5683 (Alink devices
+       reply with a JSON identity payload — that IS verification)
+    Returns candidates: {ip, port, source, payload, verified: bool}
     """
     found: list[dict] = []
     loop = asyncio.get_running_loop()
@@ -113,6 +119,7 @@ async def discover_lan_devices(timeout: float = DISCOVERY_TIMEOUT) -> list[dict]
                         "port": 5353,
                         "source": "mdns",
                         "payload": data[:120].hex(),
+                        "verified": False,
                     }
                 )
             except asyncio.TimeoutError:
@@ -121,35 +128,30 @@ async def discover_lan_devices(timeout: float = DISCOVERY_TIMEOUT) -> list[dict]
     except OSError as err:
         _LOGGER.debug("mDNS discovery failed: %s", err)
 
-    # --- 2. Alink UDP broadcast probe on 5683 ---
+    # --- 2. Alink JSON broadcast on 5683 ---
+    # A genuine Alink device answers a JSON discovery with a JSON identity
+    # ({"productKey":..,"deviceName":..}); plain CoAP stacks either stay
+    # silent or ACK as ping — only JSON replies are marked verified.
     try:
-        probe = build_frame(0x00, b"FC-DISCOVERY")
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.bind(("", 0))
-        sock.setblocking(False)
-        for bcast in ("255.255.255.255", "192.168.255.255"):
-            with contextlib.suppress(OSError):
-                await loop.sock_sendto(sock, probe, (bcast, UDP_BROADCAST_PORT))
-        end = loop.time() + timeout / 2
-        while loop.time() < end:
-            try:
-                data, addr = await asyncio.wait_for(
-                    loop.sock_recvfrom(sock, 4096), timeout=max(0.2, end - loop.time())
-                )
-                found.append(
-                    {
-                        "ip": addr[0],
-                        "port": addr[1],
-                        "source": "udp-broadcast",
-                        "payload": data[:120].hex(),
-                    }
-                )
-            except asyncio.TimeoutError:
-                break
-        sock.close()
+        from .alink import alink_discover
+
+        alink_found = await alink_discover(timeout=timeout)
+        for entry in alink_found:
+            payload = entry.get("payload")
+            verified = isinstance(payload, dict) and (
+                "productKey" in payload or "deviceName" in payload
+            )
+            found.append(
+                {
+                    "ip": entry["ip"],
+                    "port": entry.get("port", COAP_PORT),
+                    "source": "alink",
+                    "payload": payload or entry.get("raw", ""),
+                    "verified": verified,
+                }
+            )
     except OSError as err:
-        _LOGGER.debug("UDP broadcast discovery failed: %s", err)
+        _LOGGER.debug("Alink broadcast discovery failed: %s", err)
 
     # dedupe
     seen: set[tuple] = set()
@@ -161,6 +163,22 @@ async def discover_lan_devices(timeout: float = DISCOVERY_TIMEOUT) -> list[dict]
         seen.add(key)
         out.append(d)
     return out
+
+
+async def confirm_fc_device(host: str, product_key: str, device_name: str) -> dict | None:
+    """Prove a LAN host is a real FC/Alink device: real RPC with real ids."""
+    from .alink import AlinkLanDevice
+
+    try:
+        device = AlinkLanDevice(
+            host, product_key=product_key, device_name=device_name
+        )
+        info = await device.get_device_info()
+        if isinstance(info, dict):
+            return info
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 async def probe_coap(host: str, port: int = COAP_PORT, timeout: float = 3.0) -> dict | None:

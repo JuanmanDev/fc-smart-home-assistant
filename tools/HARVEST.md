@@ -1,83 +1,90 @@
 # HARVEST: confirming the real endpoints
 
-This integration ships with **hypothesis defaults** for the FC SmartHome
-(Fingerchip / Fingercrystal) cloud: the app has no public API docs, so every
-host/path/bitmask here must be confirmed against the official app. This guide
-is the exact procedure. Once done, no code changes are needed — write a JSON
-override file and point the integration/CLI at it.
+Everything below reflects the **actual state** after static APK analysis
+(v4.6.6, SecNeo-packed) and live probing. Two capture paths remain; both
+take under an hour on your own hardware and make the integration fully
+operational without guesswork.
 
-## Step 1 — Capture the app traffic (HTTPS)
+## What is already confirmed (no capture needed)
 
-```powershell
-pip install mitmproxy
-mitmproxy --listen-port 8080
+Extracted from `resources.arsc` (string table) of the real APK:
+
+```
+fingercrystal_server        = www.fcsmartlock.com    (production)
+fingercrystal_gatewayPort   = 443
+fingercrystal_appSystemPort = 443
+fingercrystal119_server     = test.fcsmartlock.com
+fingercrystaltest2_server   = test2.fcsmartlock.com
+fingercrystal_amazon_server = 18.219.242.80          (AWS channel)
+fingercrystal_image_base_url = http://www.fcsmartlock.com:8060/images/
+test_server                 = iot.qspms.cn (SaaS PMS)
 ```
 
-On the phone: Settings → Wi-Fi → your network → proxy → manual →
-`<PC-IP>:8080`, then visit `http://mitm.it` on the phone and install the CA
-(Android 7+ additionally needs the CA in the system store, or use an emulator
-with a writable system image, or a rooted device with Magisk module
-"MoveCertificate").
+Extracted from the vendor's own web bundle (fingercrystal.com/js/app-*.js):
 
-Login in the FC SmartHome app, list devices, open the lock page, tap unlock,
-open history. Save the flows (`mitmdump -w fc.flows` or export HAR from the
-UI) and note, for each request:
+- auth header: `token: <hex>` (not `Authorization: Bearer`)
+- response envelope: `{"result":1,"data":…,"message":…}` (1 = success)
+- AES-128-ECB PKCS7, key `687bbcd7f666afbcc1c44e6c9e86987c`[:16]
+- custom HTTP statuses: 672 (rate limit, "retry in 3 min"), 692 (signature gate)
 
-- exact host (e.g. `api.xxx.fingercrystal.com`)
-- path + method for: login, refresh, device list, device status, unlock,
-  lock, users list, add/remove user, fingerprint enroll, history, bell
-- the auth header format (Bearer? custom `token:` header? sign?)
-- the JSON field names (we already accept many aliases, but add yours in
-  `endpoints.py` if different)
-- the `devStatus` bitmask values: lock the door, unlock by finger, unlock by
-  password, card, leave door open, tamper — record the integer each time and
-  XOR-diff to learn the bits; update `DEVICE_STATUS_MASKS` in
-  `custom_components/fc_smarthome/api/const.py`
+Live-verified against the real servers:
 
-## Step 2 — Write the override file
+- `www.fcsmartlock.com` = Spring Boot behind nginx; `/api/*` exists but
+  upstream returns **502** (backend down at probe time — retest!)
+- `iot.qspms.cn/api/*` = **live**, answers **692** with empty body to
+  unsigned requests → the mobile API is behind a request-signature gate
+  (Alibaba SecurityGuard signs each request with the app's secret).
+- **TLS**: the cloud requires TLS1.2 + legacy renegotiation + `AES128-SHA`.
+  Python/aiohttp defaults fail with `SSLV3_ALERT_HANDSHAKE_FAILURE`
+  (this is why the app ships Alibaba's custom `libitls`). The client in
+  this repo already ships a matching connector.
 
-Create `fc_smarthome_endpoints.json` next to your HA config (or anywhere):
+## Path A — mitmproxy capture of the app (30–60 min)
 
-```json
-{
-  "regions": { "us": "https://api-realhost.example" },
-  "paths": {
-    "login": "/real/login/path",
-    "devices": "/real/device/list",
-    "unlock": "/real/device/{id}/unlock"
-  },
-  "websocket": { "enabled": true, "path": "/real/ws" }
-}
+This is now the *only* way to get: the exact REST subpaths, the request
+signing scheme (header names + algorithm), and the real login payload.
+
+1. `pip install mitmproxy; mitmproxy --listen-port 8080`
+2. Phone Wi-Fi proxy → `<PC-IP>:8080`, install CA from `http://mitm.it`
+   (Android 7+ needs the CA in the system store — use an emulator with
+   writable system image, or Magisk "MoveCertificate" on a rooted device).
+3. In the FC SmartHome app: login, list devices, open the lock page, tap
+   unlock, open history, add a password, enroll a fingerprint.
+4. Note for each request: exact path, headers (esp. any `sign`/`nonce`/
+   `timestamp`), body shape, and the `devStatus` bitmask integers while
+   you lock/unlock/tamper (record 3-4 values and XOR-diff to learn bits).
+5. Write the findings into `fc_smarthome_endpoints.json` (only the keys
+   that differ from the defaults) and set the file path in the HA options
+   — no code changes required.
+
+## Path B — BLE HCI capture (for the local channel)
+
+1. Developer options → enable "Bluetooth HCI snoop log".
+2. In the app: connect to lock, unlock, lock, beep, enroll fingerprint.
+3. `adb bugreport`, open the btsnoop in Wireshark.
+4. Update `local/ble.py`: GATT UUIDs, `CMD_*` ids, frame layout
+   (`build_frame`/`parse_frame`), and how the app authenticates
+   (pair code? derived key from account?).
+
+## Path C — LAN/Alink capture (WiFi locks & gateways)
+
+WiFi locks pair to a gateway. In the app, "连接閘道" (connect gateway)
+configures the lock's WiFi; the gateway then talks CoAP on UDP 5683.
+The capture from Path A also reveals the Alink topic URIs
+(`/sys/{productKey}/{deviceName}/thing/...`) with your device's real
+pk/dn. Then:
+
+```
+fcctl lan-register 192.168.x.x --product-key a1XXXX --device-name YYYY
+fcctl alink-call 192.168.x.x --product-key a1XXXX --device-name YYYY \
+  --method thing.deviceInfo.get
 ```
 
-Only the keys you want to override are needed; everything else keeps the
-default. Then either:
+The CoAP stack in this repo (RFC 7252 codec + Alink RPC client in
+`local/alink.py`) is complete and unit-tested; only the pk/dn and the
+service names (`thing.service.unlock` etc.) need confirming.
 
-- HA: add the file path in the integration config flow ("endpoints file"), or
-- CLI: `fcctl --endpoints-file fc_smarthome_endpoints.json devices`
-
-## Step 3 — Capture the BLE traffic (local control)
-
-1. Enable Bluetooth HCI snoop on the phone (Developer options → Bluetooth HCI
-   snoop log), pair the lock in the app, do: connect, unlock, lock, beep,
-   fingerprint enrollment.
-2. Pull the btsnoop file (`adb bugreport`), open in Wireshark.
-3. Note: the GATT service/characteristic UUIDs, the framing of writes
-   (magic bytes? length? checksum? rolling counter?), the unlock command
-   payload, how the app authenticates (pair code? derived key?).
-4. Update `custom_components/fc_smarthome/local/ble.py`: `CMD_*` ids, frame
-   layout in `build_frame`/`parse_frame`, and the UUIDs in
-   `endpoints.py:DEFAULT_BLE`.
-
-## Step 4 — Verify
-
-```bash
-fcctl probe                      # which hosts are alive
-fcctl login
-fcctl devices
-fcctl history <device-id>
-fcctl ble-scan
-```
-
-Anything that fails with `FcApiError 404` means the path is still a hypothesis
-— fix it in the JSON, not in code.
+> Pitfall we already hit so you don't have to: any RFC-7252 device will
+> ping-ACK a 4-byte UDP "FCFC" probe (your "FC" bytes are read as a
+> CoAP message-id). LAN discovery in this repo therefore only marks
+> devices verified when they answer a real Alink JSON RPC.

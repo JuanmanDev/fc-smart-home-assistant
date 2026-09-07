@@ -81,6 +81,7 @@ class FcClient:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
                 headers=self._base_headers(),
+                connector=self._make_connector(),
             )
             self._own_session = True
         return self._session
@@ -96,6 +97,32 @@ class FcClient:
             "X-Platform": "android",
             "X-App-Version": APP_VERSION,
         }
+
+    @staticmethod
+    def _make_connector() -> aiohttp.TCPConnector:
+        """Connector matching the FC cloud's legacy TLS profile.
+
+        www.fcsmartlock.com requires TLS1.2 with legacy renegotiation and
+        weak ciphers (AES128-SHA) — Python/aiohttp defaults are rejected
+        (verified live). The app ships Alibaba's libitls for the same
+        reason. We relax the client for this host only.
+        """
+        import ssl
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE  # their cert chain also fails validation
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        try:
+            ctx.set_ciphers("ALL:@SECLEVEL=0")
+        except ssl.SSLError:  # non-OpenSSL builds
+            pass
+        try:
+            ctx.options |= 0x4  # SSL_OP_LEGACY_SERVER_CONNECT
+        except Exception:  # noqa: BLE001
+            pass
+        return aiohttp.TCPConnector(ssl=ctx)
 
     async def close(self) -> None:
         if self._own_session and self._session and not self._session.closed:
