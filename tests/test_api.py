@@ -226,7 +226,7 @@ def test_aes_vendor_crypto_roundtrip():
     )
 
     try:
-        from Crypto.Cipher import AES  # noqa: F401
+        from Crypto.Cipher import AES as _AES  # noqa: F401
     except ImportError:
         import pytest
 
