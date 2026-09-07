@@ -211,6 +211,16 @@ class FcClient:
             "POST", self.endpoints.url("login"), payload=payload, auth=False
         )
         data = self._unwrap(body)
+        # vendor web stack sometimes returns AES-hex-encrypted payloads
+        for key in ("data", "result_data"):
+            value = data.get(key) if isinstance(data, dict) else None
+            if isinstance(value, str) and len(value) % 32 == 0 and len(value) >= 32:
+                decrypted = try_aes_decrypt(value)
+                if decrypted and decrypted.startswith(("{", "[")):
+                    try:
+                        data = {**data, key: json.loads(decrypted)}
+                    except json.JSONDecodeError:
+                        pass
         token = data.get("token") or data.get("access_token") or data.get("accessToken")
         if not token:
             raise FcAuthError(f"No token in login response: {body}")
