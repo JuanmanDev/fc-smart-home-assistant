@@ -101,7 +101,7 @@ async def main() -> None:
     for p in (80, 8080):
         try:
             s = socket.create_connection(("192.168.2.1", p), timeout=2)
-            s.sendall(f"GET / HTTP/1.1\r\nHost: 192.168.2.1\r\n\r\n".encode())
+            s.sendall(b"GET / HTTP/1.1\r\nHost: 192.168.2.1\r\n\r\n")
             data = s.recv(256)
             print(f"  HTTP {p}: " + repr(data[:180]))
             s.close()
