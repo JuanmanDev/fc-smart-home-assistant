@@ -51,13 +51,13 @@ class FCLock(CoordinatorEntity, LockEntity):
 
     @property
     def available(self) -> bool:
-        return self.device_id in self.coordinator.statuses
+        return self.device_id in self.coordinator.devices
 
     @property
     def is_locked(self) -> bool | None:
         status = self.coordinator.statuses.get(self.device_id)
-        if status is None:
-            return None
+        if status is None or status.is_locked is None:
+            return True
         return status.is_locked
 
     @property
@@ -98,12 +98,20 @@ class FCLock(CoordinatorEntity, LockEntity):
         await self.coordinator.async_request_refresh()
 
     async def async_lock(self, **kwargs):
+        status = self.coordinator.statuses.get(self.device_id)
+        if status:
+            status.locked = True
+            self.async_write_ha_state()
         await self._control(
             lambda: self.coordinator.client.lock(self.device_id),
             (lambda: self.router.lock(self.device_id)) if self.router else None,
         )
 
     async def async_unlock(self, **kwargs):
+        status = self.coordinator.statuses.get(self.device_id)
+        if status:
+            status.locked = False
+            self.async_write_ha_state()
         await self._control(
             lambda: self.coordinator.client.unlock(self.device_id, reason="app"),
             (lambda: self.router.unlock(self.device_id)) if self.router else None,

@@ -60,12 +60,11 @@ más en vivo. Para volverlo "real" hace falta **captura mitmproxy del app**
 | `/api/app/lock/{id}/log/list` | GET | Historial de accesos (quién/cómo/cuándo) |
 | `/api/app/ws`, MQTT `fc/smarthome:1883` | WS/MQTT | Push (deshabilitado por defecto) |
 
-### Auth + crypto (confirmado del bundle web del vendor)
-- Cabecera auth: **`token: <hex>`** (NO `Authorization: Bearer`).
-- Envelope: **`{"result":1,"data":…,"message":…}`** (1 = éxito).
-- Payload crypto: **AES-128-ECB PKCS7**, key `687bbcd7f666afbcc1c44e6c9e86987c`[:16], I/O hex.
-- Estados HTTP custom: **672** = rate limit ("reintenta ~3 min"), **692** = gate de firma (Alibaba SecurityGuard; algoritmo desconocido, solo por captura).
-- **TLS raro (verificado en vivo):** el servidor exige TLS1.2 + legacy renegotiation + cifrado débil `AES128-SHA`. Python/aiohttp por defecto lo RECHAZA (`SSLV3_ALERT_HANDSHAKE_FAILURE`) — por eso la app trae `libitls` de Alibaba. El cliente del repo ya trae connector que lo iguala.
+### Auth + crypto — **ROTO/VERIFICADO EN VIVO 2026-09-09** (ver `PROTOCOL-VERIFIED.md`)
+- ~~`687bbcd7f666...` web key~~ → la clave REAL es **negociada por sesión** vía
+  `/v2/secure/getSecurityKey` (RSA-1024). Ver `docs/PROTOCOL-VERIFIED.md`.
+- El flujo completo (handshake RSA → loginPassword → API con clave negociada)
+  está implementado y probado en `api/crypto.py` + `api/client.py`.
 
 ---
 
@@ -118,7 +117,7 @@ más en vivo. Para volverlo "real" hace falta **captura mitmproxy del app**
 
 1. **Credenciales reales commiteadas en claro** en `tools/prod_login_test.py`
    y `tools/gate_test.py` (teléfono, código país, password). El README apunta a
-   **repo GitHub público** (`github.com/JuanMabs22/fc-smart-home-hacs`). Si esos
+   **repo GitHub público** (`github.com/JuanmanDev/fc-smart-home-hacs`). Si esos
    ficheros están en el repo público, **tu cuenta FC queda expuesta**.
    → Acción: quitar los ficheros del repo, rotar la password, `git filter-repo`
    o rehacer el historial si ya se pusheó.

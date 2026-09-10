@@ -10,11 +10,16 @@ PLATFORMS = ["lock", "sensor", "binary_sensor", "switch", "button", "event"]
 
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
+CONF_TOKEN = "token"
+CONF_FAMILY_ID = "family_id"
 CONF_REGION = "region"
 CONF_POLL_INTERVAL = "poll_interval"
 CONF_LOCAL_BLE = "local_ble"
 CONF_LOCAL_LAN = "local_lan"
 CONF_ENDPOINTS_FILE = "endpoints_file"
+CONF_SECURE_DATA = "secure_data"
+CONF_PRIVATE_KEY = "private_key"
+
 
 DEFAULT_POLL_INTERVAL = 30
 
@@ -36,6 +41,7 @@ SERVICE_DELETE_USER = "delete_user"
 SERVICE_RENAME_USER = "rename_user"
 SERVICE_ENROLL_FINGERPRINT = "enroll_fingerprint"
 SERVICE_FETCH_HISTORY = "fetch_history"
+SERVICE_IMPORT_HISTORY = "import_history"
 SERVICE_RING_BELL = "ring_bell"
 SERVICE_BEEP = "locate_device"
 SERVICE_SET_CHILD_LOCK = "set_child_lock"

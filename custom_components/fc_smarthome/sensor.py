@@ -7,6 +7,7 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -20,11 +21,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities: list[SensorEntity] = []
     for device_id, device in coordinator.devices.items():
         entities.append(FCLastEventSensor(coordinator, device_id))
-        status = coordinator.statuses.get(device_id)
-        if status is not None and status.battery is not None:
-            entities.append(FCBatterySensor(coordinator, device_id))
-        if status is not None and status.signal is not None:
-            entities.append(FCSignalSensor(coordinator, device_id))
+        entities.append(FCBatterySensor(coordinator, device_id))
+        entities.append(FCSignalSensor(coordinator, device_id))
+        entities.append(FCLastUnlockUserSensor(coordinator, device_id))
+        entities.append(FCLastUnlockMethodSensor(coordinator, device_id))
+        entities.append(FCLastUnlockTimeSensor(coordinator, device_id))
+        entities.append(FCDoorbellLastRingSensor(coordinator, device_id))
+        entities.append(FCDoorbellRingCountSensor(coordinator, device_id))
+        entities.append(FCLastAlarmSensor(coordinator, device_id))
+        entities.append(FCLockFirmwareSensor(coordinator, device_id))
+        entities.append(FCLockMacSensor(coordinator, device_id))
     async_add_entities(entities)
 
 
@@ -49,7 +55,7 @@ class FCBatterySensor(FCSensorBase):
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "%"
-    _attr_entity_category = "diagnostic"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "battery", "Battery")
@@ -63,7 +69,7 @@ class FCBatterySensor(FCSensorBase):
 class FCSignalSensor(FCSensorBase):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "dBm"
-    _attr_entity_category = "diagnostic"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:signal"
 
     def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
@@ -109,3 +115,105 @@ class FCLastEventSensor(FCSensorBase):
         if log:
             attrs["access_log"] = list(log)
         return attrs
+
+
+class FCLastUnlockUserSensor(FCSensorBase):
+    _attr_icon = "mdi:account-key"
+
+    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "last_unlock_user", "Last unlock user")
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.last_unlock_user.get(self.device_id)
+
+
+class FCLastUnlockMethodSensor(FCSensorBase):
+    _attr_icon = "mdi:key"
+
+    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "last_unlock_method", "Last unlock method")
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.last_unlock_method.get(self.device_id)
+
+
+class FCLastUnlockTimeSensor(FCSensorBase):
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:clock-check-outline"
+
+    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "last_unlock_time", "Last unlock time")
+
+    @property
+    def native_value(self):
+        return self.coordinator.last_unlock_time.get(self.device_id)
+
+
+class FCDoorbellLastRingSensor(FCSensorBase):
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:bell-ring-outline"
+
+    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "doorbell_last_ring", "Last doorbell ring")
+
+    @property
+    def native_value(self):
+        return self.coordinator.doorbell_last_ring.get(self.device_id)
+
+
+class FCDoorbellRingCountSensor(FCSensorBase):
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:counter"
+
+    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "doorbell_ring_count", "Doorbell ring count")
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.doorbell_ring_count.get(self.device_id, 0)
+
+
+class FCLastAlarmSensor(FCSensorBase):
+    _attr_icon = "mdi:shield-alert-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "last_alarm", "Last alarm")
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.last_alarm.get(self.device_id) or "None"
+
+
+class FCLockFirmwareSensor(FCSensorBase):
+    _attr_icon = "mdi:cellphone-arrow-down"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "firmware_version", "Firmware version")
+
+    @property
+    def native_value(self) -> str | None:
+        dev = self.coordinator.devices.get(self.device_id)
+        fw = self.coordinator.device_firmware.get(self.device_id)
+        if fw:
+            return fw
+        return dev.capabilities.get("firmwareVersion") if dev else None
+
+
+class FCLockMacSensor(FCSensorBase):
+    _attr_icon = "mdi:bluetooth"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "ble_mac", "Bluetooth MAC")
+
+    @property
+    def native_value(self) -> str | None:
+        dev = self.coordinator.devices.get(self.device_id)
+        if dev:
+            return dev.capabilities.get("bleMac") or dev.capabilities.get("mac")
+        return None
+

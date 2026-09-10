@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/icon.png" width="128" height="128" alt="FC SmartHome logo">
+</p>
+
 # FC SmartHome HACS
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-red.svg)](https://github.com/hacs/integration)
@@ -52,7 +56,7 @@ app for everything you'd want from a home-automation hub:
 ### Home Assistant (HACS custom)
 
 1. HACS → ⋮ (top right) → *Custom repositories*, add
-   `https://github.com/JuanMabs22/fc-smart-home-hacs` as **Integration**.
+   `https://github.com/JuanmanDev/fc-smart-home-hacs` as **Integration**.
 2. Install *FC SmartHome*, restart HA.
 3. Settings → Devices & Services → **+ Add Integration** → **FC SmartHome**.
 4. Enter your FC SmartHome app email/password (region `us`/`eu`/`cn`/`ru`).
@@ -63,7 +67,7 @@ Manual: copy `custom_components/fc_smarthome` into `/config/custom_components/`.
 ### CLI
 
 ```powershell
-git clone https://github.com/JuanMabs22/fc-smart-home-hacs
+git clone https://github.com/JuanmanDev/fc-smart-home-hacs
 cd fc-smart-home-hacs
 pip install -e .          # installs the `fcctl` command
 # or run without installing:

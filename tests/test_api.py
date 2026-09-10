@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -35,8 +36,10 @@ def test_registry_defaults_load():
 
 def test_registry_url_device_id():
     reg = EndpointRegistry.load("eu")
-    url = reg.url("unlock", "dev123")
-    assert "dev123" in url
+    # device_status is now a POST endpoint (device id travels in the
+    # encrypted body), so the URL contains the verified path only
+    assert reg.url("device_status") == "https://www.fcsmartlock.com/v2/device/getDevice"
+    assert reg.url("login").endswith("/v2/login/loginPassword")
 
 
 def test_registry_override(tmp_path):
@@ -119,7 +122,13 @@ def test_unwrap_and_listify():
 def test_parse_device_aliases():
     c = make_client()
     dev = c._parse_device(
-        {"device_id": "7", "name": "Front", "category": "lock", "batteryVal": "88"}
+        {
+            "deviceuuid": "7",
+            "name": "Front",
+            "deviceCategory": {"productModel": "SMART_LOCK"},
+            "battery": 88,
+            "messagetime": 1700000000000,
+        }
     )
     assert isinstance(dev, Device)
     assert dev.device_id == "7"
@@ -129,19 +138,32 @@ def test_parse_device_aliases():
 
 def test_parse_status_int_and_bool():
     c = make_client()
-    s1 = c._parse_status("d1", {"devStatus": DEVICE_STATUS_MASKS["locked"], "batteryVal": 90})
-    assert s1.locked is True and s1.battery == 90
-    s2 = c._parse_status("d1", {"locked": True})
-    assert s2.locked is True
+    # verified shape: lockState 0/1 + doorState bool from getDevice
+    class _Dev:
+        raw = {"lockState": 1, "doorState": False, "battery": 90}
+        battery = 90
+        device_id = "d1"
+
+    async def fake_get_device(device_id):
+        return _Dev()
+
+    c.get_device = fake_get_device
+    import asyncio
+
+    status = asyncio.run(c.get_device_status("d1"))
+    assert status.locked is True and status.battery == 90
 
 
 def test_parse_users_int_type():
     c = make_client()
-    users = c._parse_users(
-        "d1", {"data": {"list": [{"id": 3, "type": 1, "name": "Dad", "pwd": "123456"}]}}
+    # verified getLockUserList/v2 shape
+    user = c._parse_user(
+        {"id": "abc123", "usertype": 1, "username": "Dad", "enable": True,
+         "createtime": 1782422785000}
     )
-    assert users[0].type is LockUserType.FINGER
-    assert users[0].password_masked.startswith("12")
+    assert user.type is LockUserType.FINGER
+    assert user.name == "Dad"
+    assert user.active is True
 
 
 def test_parse_events_types():
@@ -149,20 +171,21 @@ def test_parse_events_types():
     events = c._parse_events(
         "d1",
         {
-            "data": {
-                "list": [
-                    {"time": 1700000000000, "type": 1, "user": "Dad", "devStatus": 4},
-                    {"time": 1700000001000, "type": 9, "devStatus": DEVICE_STATUS_MASKS["tamper"]},
-                    {"time": 1700000002000, "type": "bell"},
-                ]
-            }
+            "data": [
+                {"messageKey": "lock.message.local.open", "message": "open lock",
+                 "userName": "Dad", "messageTime": 1700000000000, "id": "e1"},
+                {"messageKey": "lock.message.illegaloperation.alarm", "message": "Alarm",
+                 "messageTime": 1700000001000, "id": "e2"},
+                {"messageKey": "lock.message.lock.bell", "message": "lock bell",
+                 "messageTime": 1700000002000, "id": "e3"},
+            ]
         },
     )
     # sorted newest-first: bell, tamper, dad
     assert [e.type for e in events] == [
         LockEventType.BELL,
         LockEventType.TAMPER,
-        LockEventType.LOCKED,
+        LockEventType.UNLOCKED,
     ]
     assert events[2].user == "Dad"
 
@@ -170,10 +193,12 @@ def test_parse_events_types():
 def test_parse_event_unlock_by_user():
     c = make_client()
     ev = c._parse_event(
-        "d1", {"time": 1700000000000, "type": 1, "user": "Mom", "devStatus": 0, "isRemote": 1}
+        "d1",
+        {"messageKey": "lock.message.remote.open.success",
+         "message": "Successful to remotely open",
+         "messageTime": 1700000000000, "id": "e1"},
     )
     assert ev.type is LockEventType.UNLOCKED
-    assert ev.user == "Mom"
     assert ev.remote is True
 
 
@@ -209,7 +234,7 @@ def test_apk_extracted_production_server():
     assert reg.base_url == "https://www.fcsmartlock.com"
     assert reg.regions["intl-aws"] == "https://18.219.242.80"
     assert reg.regions["test"] == "https://test.fcsmartlock.com"
-    assert reg.url("login").startswith("https://www.fcsmartlock.com/api/")
+    assert reg.url("login").startswith("https://www.fcsmartlock.com/v2/")
 
 
 def test_discovery_candidates_prioritize_apk_host():
@@ -446,10 +471,9 @@ async def test_lan_transport_frame_roundtrip():
 
 class _FakeResp:
     def __init__(self, status, body):
-        import json as _json
-
         self.status = status
-        self._text = _json.dumps(body)
+        # body is already the wire text: a JSON-quoted hex string
+        self._text = body
 
     async def text(self):
         return self._text
@@ -471,35 +495,47 @@ class _FakeSession:
         return self._resp
 
 
+def _logged_in_client(fake_session):
+    c = FcClient("600000000", "pw")
+    c.tokens = TokenPair(access_token="tok")
+    c._session_key = b"0123456789abcdef"
+    c._session = fake_session
+    return c
+
+
 @pytest.mark.asyncio
 async def test_error_envelope_raises_auth():
     from custom_components.fc_smarthome.api.errors import FcAuthError
 
-    c = FcClient("u@example.com", "pw")
-    c.tokens = TokenPair(access_token="tok")
-    c._session = _FakeSession(200, {"code": 1001, "msg": "token expired"})
+    # vendor error envelope inside the encrypted blob
+    from custom_components.fc_smarthome.api.crypto import aes_encrypt_hex
+
+    body = aes_encrypt_hex(b"0123456789abcdef", '{"result": 1001, "message": "token expired"}')
+    c = _logged_in_client(_FakeSession(200, json.dumps(body)))
     with pytest.raises(FcAuthError):
-        await c._request("GET", "https://x/y")
+        await c._request("POST", "https://x/y", payload={})
 
 
 @pytest.mark.asyncio
 async def test_error_envelope_raises_api_error():
     from custom_components.fc_smarthome.api.errors import FcApiError
 
-    c = FcClient("u@example.com", "pw")
-    c.tokens = TokenPair(access_token="tok")
-    c._session = _FakeSession(200, {"code": 500, "msg": "device offline"})
+    from custom_components.fc_smarthome.api.crypto import aes_encrypt_hex
+
+    body = aes_encrypt_hex(b"0123456789abcdef", '{"result": 500, "message": "device offline"}')
+    c = _logged_in_client(_FakeSession(200, json.dumps(body)))
     with pytest.raises(FcApiError):
-        await c._request("GET", "https://x/y")
+        await c._request("POST", "https://x/y", payload={})
 
 
 @pytest.mark.asyncio
 async def test_success_envelope_passes():
-    c = FcClient("u@example.com", "pw")
-    c.tokens = TokenPair(access_token="tok")
-    c._session = _FakeSession(200, {"code": 0, "data": {"ok": True}})
-    body = await c._request("GET", "https://x/y")
-    assert body["data"]["ok"] is True
+    from custom_components.fc_smarthome.api.crypto import aes_encrypt_hex
+
+    body = aes_encrypt_hex(b"0123456789abcdef", '{"result": 1, "data": {"ok": true}}')
+    c = _logged_in_client(_FakeSession(200, json.dumps(body)))
+    result = await c._request("POST", "https://x/y", payload={})
+    assert result["data"]["ok"] is True
 
 
 # ---------- CoAP / Alink codec ----------
@@ -576,3 +612,226 @@ def test_lan_discovery_marks_candidates_unverified():
     from custom_components.fc_smarthome.local.lan import confirm_fc_device
 
     assert callable(confirm_fc_device)
+
+
+def test_fc_ble_package_roundtrip():
+    """Verify official FCBlePackage AES framing and inner FCBleBaseMessage roundtrip."""
+    from custom_components.fc_smarthome.local.ble import (
+        CATEGORY_USER,
+        CMD_USER_REMOTE_UNLOCK,
+        DEFAULT_AES_KEY,
+        FCBleBaseMessage,
+        build_fc_package,
+        parse_fc_package,
+    )
+
+    # Remote unlock command: Category 0x04, Cmd 0x10, data [0x01]
+    msg = FCBleBaseMessage(
+        cmd_category=CATEGORY_USER,
+        cmd=CMD_USER_REMOTE_UNLOCK,
+        data=b"\x01",
+        seq=42,
+        pid=1,
+    )
+    frame = build_fc_package(msg, key_hex=DEFAULT_AES_KEY, version=2)
+    assert frame[0] == 0xFD
+    assert frame[-1] == 0xFE
+    assert frame[1] == 1  # PID
+
+    parsed = parse_fc_package(frame, key_hex=DEFAULT_AES_KEY, version=2)
+    assert parsed is not None
+    assert parsed.cmd_category == CATEGORY_USER
+    assert parsed.cmd == CMD_USER_REMOTE_UNLOCK
+    assert parsed.data == b"\x01"
+    assert parsed.seq == 42
+    assert parsed.pid == 1
+
+
+def test_parse_real_live_lock_device():
+    """Verify parsing real device payload extracted from live ACache."""
+    c = make_client()
+    raw = {
+        "alarmLockNotClosed": 0,
+        "battery": 50,
+        "bleMac": "341727051920",
+        "bluetooth": True,
+        "bluetoothKey": "4CADB87095639211A1303639D98E9150",
+        "deviceCategory": {
+            "model": "L5-WIFI-QINGKE",
+            "name": "L5",
+            "functions": "6013452",
+        },
+        "deviceuuid": "7b120ba58284f360699d44cebaba0a12",
+        "id": "7b120ba58284f360699d44cebaba0a12",
+        "locSecretKey": "0246f8c5092b29e29a971a0cd1f610fb016763df807a7e70960d4cd3118e601a",
+        "mac": "341727051920",
+        "name": "Smart Lock",
+        "noNetPasswordKey": "fb6c2754a716ba88",
+        "protocolversion": "6.5",
+        "state": 1,
+        "lockState": 0,
+        "doorState": False,
+        "wifissid": "PJ4_IoT",
+    }
+    dev = c._parse_device(raw)
+    assert dev is not None
+    assert dev.device_id == "7b120ba58284f360699d44cebaba0a12"
+    assert dev.name == "Smart Lock"
+    assert dev.model == "L5-WIFI-QINGKE"
+    assert dev.category == "lock"
+    assert dev.is_lock is True
+    assert dev.battery == 50
+    assert dev.online is True
+    assert dev.capabilities["bluetoothKey"] == "4CADB87095639211A1303639D98E9150"
+    assert dev.capabilities["mac"] == "341727051920"
+    assert dev.capabilities["lockState"] == 0
+
+
+def test_token_pair_session_cookie():
+    """Verify TokenPair stores session_id and family_id for persistence."""
+    tp = TokenPair(
+        access_token="tok123",
+        session_id="2897e0c3-3644-4f49-918f-33640075e933",
+        family_id="fam_dummy_12345",
+    )
+    d = tp.to_dict()
+    assert d["session_id"] == "2897e0c3-3644-4f49-918f-33640075e933"
+    assert d["family_id"] == "fam_dummy_12345"
+    restored = TokenPair.from_dict(d)
+    assert restored.session_id == tp.session_id
+    assert restored.family_id == tp.family_id
+
+
+def test_router_register_ble():
+    from custom_components.fc_smarthome.local.router import FcTransportRouter
+
+    c = FcClient("user@test.com", "pass")
+    router = FcTransportRouter(c)
+    router.register_ble("dev_1", "34:17:27:05:19:20")
+    assert router._ble_addresses["dev_1"] == "34:17:27:05:19:20"
+
+
+def test_coordinator_doorbell_trigger():
+    from custom_components.fc_smarthome.coordinator import FcCoordinator
+    from custom_components.fc_smarthome.api.models import LockEventType
+
+    coord = FcCoordinator.__new__(FcCoordinator)
+    coord.devices = {}
+    coord.statuses = {}
+    coord.last_event = {}
+    coord.access_log = {}
+    coord.bell_active = {}
+    coord._seen_log_ids = {}
+    coord.doorbell_last_ring = {}
+    coord.doorbell_ring_count = {}
+
+    coord.trigger_doorbell("d1")
+    assert "d1" in coord.bell_active
+    assert coord.doorbell_ring_count["d1"] == 1
+    assert coord.doorbell_last_ring["d1"] is not None
+    assert coord.last_event["d1"].type == LockEventType.BELL
+
+    coord.trigger_doorbell("d1")
+    assert coord.doorbell_ring_count["d1"] == 2
+
+
+def test_coordinator_ble_adv_handling():
+    from custom_components.fc_smarthome.coordinator import FcCoordinator
+    from custom_components.fc_smarthome.api.models import LockStatus
+
+    coord = FcCoordinator.__new__(FcCoordinator)
+    coord.devices = {}
+    coord.statuses = {"d1": LockStatus(device_id="d1", locked=True)}
+    coord.last_event = {}
+    coord.access_log = {}
+    coord.bell_active = {}
+    coord._seen_log_ids = {}
+    coord.doorbell_last_ring = {}
+    coord.doorbell_ring_count = {}
+    coord.signal_strengths = {}
+    coord.ble_last_seen = {}
+    coord._last_ble_sync = {}
+    coord._ble_sync_tasks = {}
+
+    class DummyServiceInfo:
+        rssi = -75
+        manufacturer_data = {
+            # 2050 with lock_status = 0x02 (bell active)
+            2050: b"341727051920\x00\x01\x02\x00\x00\x00\x00\x00"
+        }
+
+    coord.handle_ble_advertisement("d1", DummyServiceInfo())
+    assert coord.signal_strengths["d1"] == -75
+    assert coord.statuses["d1"].signal == -75
+    assert "d1" in coord.bell_active
+    assert coord.doorbell_ring_count["d1"] == 1
+
+
+@pytest.mark.asyncio
+async def test_coordinator_sync_ble_records_simulation():
+    from custom_components.fc_smarthome.coordinator import FcCoordinator
+    from custom_components.fc_smarthome.api.models import Device, LockStatus
+
+    coord = FcCoordinator.__new__(FcCoordinator)
+    dev = Device(
+        device_id="d1",
+        name="Smart Lock",
+        capabilities={"bleMac": "34:17:27:05:19:20", "deviceBindUserId": "bind123"},
+    )
+    coord.devices = {"d1": dev}
+    coord.statuses = {"d1": LockStatus(device_id="d1", locked=True)}
+    coord.last_event = {}
+    coord.access_log = {}
+    coord.bell_active = {}
+    coord._seen_log_ids = {}
+    coord.doorbell_last_ring = {}
+    coord.doorbell_ring_count = {}
+    coord.last_unlock_user = {}
+    coord.last_unlock_method = {}
+    coord.last_unlock_time = {}
+    coord.last_alarm = {}
+    coord.device_firmware = {}
+    coord.device_model = {}
+    coord.user_cache = {}
+
+    class MockTransport:
+        async def handshake(self, user_id):
+            return {
+                "firmware_version": "V4.5.11",
+                "model": "L5-WIFI",
+                "wake_source": 0,
+            }
+
+        async def read_device_info(self):
+            return {1: 85}
+
+        async def query_users(self):
+            return [{"user_id": 1, "user_type": 1}]
+
+        async def query_records(self, record_type=1):
+            return [
+                {
+                    "timestamp": 1700000000,
+                    "type": 1,  # unlock
+                    "model1": 1,  # fingerprint
+                    "user_id": 1,
+                }
+            ]
+
+    class MockBleManager:
+        async def transport(self, mac):
+            return MockTransport()
+
+    class MockRouter:
+        ble_manager = MockBleManager()
+
+    coord.router = MockRouter()
+    events = await coord.async_sync_ble_records("d1")
+    assert len(events) == 1
+    assert coord.statuses["d1"].battery == 85
+    assert coord.last_unlock_method["d1"] == "Fingerprint"
+    assert coord.last_unlock_user["d1"] == "Fingerprint 1"
+    assert coord.device_firmware["d1"] == "V4.5.11"
+
+
+

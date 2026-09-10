@@ -1,8 +1,8 @@
 """FC SmartHome cloud client.
 
-Async HTTP client for the Fingerchip/Fingercrystal smart lock cloud.
-All network paths go through EndpointRegistry so every host/path can be
-hot-swapped from a capture file without code changes.
+Implements the verified vendor protocol (see crypto.py docstring for the
+wire details). All request/response bodies are AES-ECB hex blobs; the session
+key is negotiated per login via /v2/secure/getSecurityKey.
 """
 
 from __future__ import annotations
@@ -11,11 +11,18 @@ import asyncio
 import contextlib
 import json
 import logging
-import time
 from typing import Any, Callable
 
 import aiohttp
 
+from .crypto import (
+    aes_decrypt_hex,
+    aes_encrypt_hex,
+    load_private_key,
+    md5_hex,
+    now_ms,
+    rsa_private_decrypt,
+)
 from .endpoints import EndpointRegistry
 from .errors import FcApiError, FcAuthError, FcConnectionError, FcError
 from .models import (
@@ -30,8 +37,6 @@ from .models import (
     UnlockMethod,
     parse_ts,
 )
-from .const import DEVICE_STATUS_MASKS, UNLOCK_METHOD_LABELS, USER_TYPE_INT_MAP
-from .discovery import APP_VERSION, try_aes_decrypt, try_aes_encrypt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,18 +44,27 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = 1.5
 REQUEST_TIMEOUT = 15
 RATE_LIMIT_STATUS = 672  # vendor-specific: too many requests, retry in 3 min
+TOKEN_EXPIRED_STATUS = 690  # vendor-specific: token expired -> re-login
+RESULT_OK = 1
+
+# Verified messageKey -> (LockEventType, UnlockMethod|None) mapping from live
+# /v2/lock/getLockMessageList/v2 captures (2026-09-09).
+MESSAGE_KEY_MAP = {
+    "lock.message.local.open": (LockEventType.UNLOCKED, None),  # local credential unlock
+    "lock.message.Bluetoothd.open.success": (LockEventType.UNLOCKED, UnlockMethod.APP),
+    "lock.message.remote.open.success": (LockEventType.UNLOCKED, UnlockMethod.REMOTE),
+    "lock.message.lock.bell": (LockEventType.BELL, None),
+    "lock.message.battery.change": (None, None),  # informational battery update
+    "lock.message.lower.battery": (LockEventType.LOW_BATTERY, None),
+    "lock.message.illegaloperation.alarm": (LockEventType.TAMPER, None),
+    "lock.message.adduser": (LockEventType.USER_ADDED, None),
+    "lock.message.deleteuser": (LockEventType.USER_REMOVED, None),
+    "lock.message.changeusername": (None, None),  # informational rename
+}
 
 
 class FcClient:
-    """Low-level cloud client: auth, transport, endpoints, retries.
-
-    Protocol details mirror the vendor's own stack (ZHIXIN web platform):
-    - auth header: ``token: <hex>`` (not Bearer)
-    - response envelope: ``{"result": 1, "data": ..., "message": ...}``
-      where result==1 means success
-    - optional AES-ECB/PKCS7 payload crypto with the vendor web key
-    - HTTP 672 = vendor rate limit (wait ~3 minutes)
-    """
+    """Cloud client speaking the FC SmartHome encrypted protocol."""
 
     def __init__(
         self,
@@ -60,8 +74,11 @@ class FcClient:
         endpoints: EndpointRegistry | None = None,
         session: aiohttp.ClientSession | None = None,
         on_token_refreshed: Callable[[TokenPair], None] | None = None,
-        use_vendor_crypto: bool = True,
+        secure_data: str | None = None,
+        private_key_b64: str | None = None,
     ) -> None:
+        # The vendor login is phone-based; "email" holds the account name
+        # (phone number in E.164 or national format).
         self.email = email
         self._password = password
         self.endpoints = endpoints or EndpointRegistry.load(region)
@@ -72,7 +89,11 @@ class FcClient:
         self._on_token_refreshed = on_token_refreshed
         self._user_cache: dict[str, dict[str, LockUser]] = {}
         self._last_events: dict[str, list[LockEvent]] = {}
-        self._use_vendor_crypto = use_vendor_crypto
+        # protocol artifacts
+        self._secure_data = secure_data  # 'secureData=<urlencoded b64>'
+        self._private_key_b64 = private_key_b64
+        self._session_key: bytes | None = None  # negotiated AES key
+        self._cookie_session: str | None = None  # SESSION cookie value (b64)
 
     # ---------- transport ----------
 
@@ -80,44 +101,32 @@ class FcClient:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-                headers=self._base_headers(),
                 connector=self._make_connector(),
             )
             self._own_session = True
         return self._session
-
-    def _base_headers(self) -> dict[str, str]:
-        return {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": f"FCSmartHome/{APP_VERSION} (Android 15)",
-            "timezone": "0",  # minutes offset, like the web app
-            "version": "1.0.4R",
-            "Accept-Language": "en",
-            "X-Platform": "android",
-            "X-App-Version": APP_VERSION,
-        }
 
     @staticmethod
     def _make_connector() -> aiohttp.TCPConnector:
         """Connector matching the FC cloud's legacy TLS profile.
 
         www.fcsmartlock.com requires TLS1.2 with legacy renegotiation and
-        weak ciphers (AES128-SHA) — Python/aiohttp defaults are rejected
-        (verified live). The app ships Alibaba's libitls for the same
-        reason. We relax the client for this host only.
+        weak ciphers (AES128-SHA) — verified live. The app ships Alibaba's
+        libitls for the same reason.
         """
         import ssl
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE  # their cert chain also fails validation
+        ctx.verify_mode = ssl.CERT_NONE  # their cert chain fails validation
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.maximum_version = ssl.TLSVersion.TLSv1_2
-        try:
-            ctx.set_ciphers("ALL:@SECLEVEL=0")
-        except ssl.SSLError:  # non-OpenSSL builds
-            pass
+        for cipher_suite in ("DEFAULT@SECLEVEL=1", "ALL:@SECLEVEL=0"):
+            try:
+                ctx.set_ciphers(cipher_suite)
+                break
+            except ssl.SSLError:
+                pass
         try:
             ctx.options |= 0x4  # SSL_OP_LEGACY_SERVER_CONNECT
         except Exception:  # noqa: BLE001
@@ -129,184 +138,241 @@ class FcClient:
             await self._session.close()
         self._session = None
 
+    def _base_headers(self, token: str = "") -> dict[str, str]:
+        h = {
+            "token": token,
+            "Accept-Language": "en",
+            "version": "4.6.6",
+            "timezone": "7200000",
+            "platform": "Android",
+            "appid": "c2a51810216243f69a55571973f1b5d7",
+            "phoneId": "5135c25e1ea8e628595521ba0c456ff1",
+            "addition": (
+                "31458C23F20BCE6C25A3AE6F56DC101DAF8402E2A13A38EB23C61925D528B2166"
+                "E818FC3177EADED83BF0A116091BCF0"
+            ),
+            "Content-Type": "application/json;charset=UTF-8",
+            "User-Agent": "okhttp/3.12.8",
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "gzip",
+        }
+        if self._cookie_session:
+            h["Cookie"] = f"SESSION={self._cookie_session}"
+        return h
+
     async def _request(
         self,
         method: str,
         url: str,
         payload: dict | None = None,
-        params: dict | None = None,
         auth: bool = True,
         retries: int = MAX_RETRIES,
     ) -> Any:
+        """Send an encrypted request; returns the decrypted JSON envelope."""
+        if auth and not (self.tokens and self.tokens.access_token and self._session_key):
+            raise FcAuthError("Not logged in")
         session = await self._ensure_session()
-        headers: dict[str, str] = {}
-        if auth:
-            if not self.tokens or not self.tokens.access_token:
-                raise FcAuthError("Not logged in")
-            # vendor stack uses a plain `token:` header (ZHIXIN web app)
-            headers["token"] = self.tokens.access_token
+        key = self._session_key or b""
+        headers = self._base_headers(self.tokens.access_token if auth else "")
+        if key:  # ts is present on every encrypted call, login included
+            headers["ts"] = aes_encrypt_hex(key, str(now_ms()))
+        body = aes_encrypt_hex(key, json.dumps(payload or {})) if payload is not None else None
+
         last_error: Exception | None = None
         for attempt in range(retries):
             try:
-                async with session.request(
-                    method, url, json=payload, params=params, headers=headers
-                ) as resp:
-                    body_text = await resp.text()
+                async with session.request(method, url, data=body, headers=headers) as resp:
+                    text = await resp.text()
                     if resp.status in (429, RATE_LIMIT_STATUS, 500, 502, 503, 504) and attempt < retries - 1:
                         await asyncio.sleep(min(RETRY_BACKOFF**attempt, 8))
                         continue
-                    try:
-                        body = json.loads(body_text) if body_text else {}
-                    except json.JSONDecodeError:
-                        body = {"_raw": body_text}
-                    if resp.status == 401:
-                        raise FcAuthError(f"401 from {url}: {body_text[:200]}")
+                    if resp.status == TOKEN_EXPIRED_STATUS:
+                        if auth and self._password and attempt == 0:
+                            _LOGGER.info("Cloud token expired (690). Re-login...")
+                            with contextlib.suppress(FcError):
+                                await self.login()
+                                return await self._request(
+                                    method, url, payload, auth=auth, retries=1
+                                )
+                        raise FcAuthError(f"Token expired (690) from {url}")
                     if resp.status >= 400:
-                        raise FcApiError(
-                            f"HTTP {resp.status} from {url}",
-                            code=resp.status,
-                            payload=body,
-                        )
-                    if isinstance(body, dict):
-                        # ZHIXIN envelope: {"result":1|0, "data":..., "message":...}
-                        if "result" in body:
-                            if body.get("result") != 1:
-                                msg = str(body.get("message") or body_text[:200])
-                                if "token" in msg.lower() or body.get("result") in (672, 401, 1001):
-                                    raise FcAuthError(f"API result {body.get('result')}: {msg}")
-                                raise FcApiError(
-                                    f"API result {body.get('result')}: {msg}",
-                                    code=body.get("result") if isinstance(body.get("result"), int) else resp.status,
-                                    payload=body,
-                                )
-                            return body
-                        # fallback: generic Chinese-cloud code envelope
-                        err_code = body.get("code")
-                        if err_code is None:
-                            err_code = body.get("errcode")
-                        if err_code is None:
-                            err_code = body.get("error")
-                        if err_code is not None and str(err_code) not in ("0", "200", "success", "ok"):
-                            msg = str(body.get("msg") or body.get("message") or body_text[:200])
-                            if "token" in msg.lower() or str(err_code) in ("401", "1001", "1002"):
-                                raise FcAuthError(
-                                    f"API error {err_code} from {url}: {msg}"
-                                )
-                            raise FcApiError(
-                                f"API error {err_code} from {url}: {msg}",
-                                code=err_code if isinstance(err_code, int) else resp.status,
-                                payload=body,
-                            )
-                    return body
+                        # error bodies are encrypted too
+                        message = text[:200]
+                        if text.startswith('"') and len(text) > 4:
+                            with contextlib.suppress(Exception):
+                                message = aes_decrypt_hex(key, json.loads(text))[:200]
+                        raise FcApiError(f"HTTP {resp.status} from {url}: {message}",
+                                         code=resp.status)
+                    # success: envelope is a quoted hex string
+                    if not text.startswith('"'):
+                        # plain JSON envelope (rare, e.g. getSecurityKey)
+                        try:
+                            return json.loads(text)
+                        except json.JSONDecodeError:
+                            return {"_raw": text}
+                    hex_str = json.loads(text)
+                    if not isinstance(hex_str, str):
+                        return hex_str
+                    plain = aes_decrypt_hex(key, hex_str)
+                    try:
+                        envelope = json.loads(plain)
+                    except json.JSONDecodeError:
+                        return {"_raw": plain}
+                    # vendor envelope: result != 1 is an error
+                    if isinstance(envelope, dict) and "result" in envelope:
+                        if envelope.get("result") != RESULT_OK:
+                            msg = str(envelope.get("message") or plain[:200])
+                            code = envelope.get("result")
+                            if code in (1001, 401) or "token" in msg.lower():
+                                raise FcAuthError(f"API result {code}: {msg}")
+                            raise FcApiError(f"API result {code}: {msg}",
+                                             code=code, payload=envelope)
+                    return envelope
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 last_error = err
                 if attempt < retries - 1:
                     await asyncio.sleep(min(RETRY_BACKOFF**attempt, 8))
         raise FcConnectionError(f"Request to {url} failed: {last_error}")
 
+    async def _post(self, path_key: str, payload: dict | None = None, auth: bool = True) -> dict:
+        body = await self._request("POST", self.endpoints.url(path_key), payload=payload, auth=auth)
+        if isinstance(body, dict) and "result" in body:
+            if body.get("result") != RESULT_OK:
+                raise FcApiError(
+                    f"API result {body.get('result')}: {body.get('message', '')}",
+                    code=body.get("result"),
+                    payload=body,
+                )
+        return body
+
     # ---------- auth ----------
 
+    async def _handshake(self) -> bytes:
+        """Negotiate the session AES key via getSecurityKey."""
+        import base64
+
+        if not self._secure_data or not self._private_key_b64:
+            raise FcAuthError(
+                "FC cloud login requires the app's secureData blob and RSA "
+                "private key (captured from the official app)."
+            )
+        session = await self._ensure_session()
+        headers = self._base_headers()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        headers.pop("Cookie", None)
+        async with session.post(
+            self.endpoints.url("security_key"), data=self._secure_data, headers=headers
+        ) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                raise FcAuthError(f"getSecurityKey HTTP {resp.status}: {text[:120]}")
+            env = json.loads(text)
+            if env.get("result") != RESULT_OK or not env.get("data"):
+                raise FcAuthError(f"getSecurityKey failed: {env.get('message')}")
+            cookie = resp.cookies.get("SESSION")
+            if cookie:
+                self._cookie_session = cookie.value
+        private = load_private_key(self._private_key_b64)
+        payload = rsa_private_decrypt(private, base64.b64decode(env["data"]))
+        if not payload or len(payload) < 16:
+            raise FcAuthError("Could not decrypt negotiated key (bad RSA payload)")
+        negotiated_hex = payload.decode("ascii", errors="replace").strip()
+        self._session_key = negotiated_hex[:16].encode("ascii")
+        _LOGGER.debug("negotiated session key acquired")
+        return self._session_key
+
     async def login(self) -> TokenPair:
-        """Login; on unknown-host/404, self-configure via discovery first."""
-        try:
-            return await self._login_once()
-        except (FcConnectionError, FcApiError) as err:
-            _LOGGER.debug("login failed on current endpoints (%s); trying discovery", err)
-            from .discovery import auto_configure
+        """Full login: handshake + loginPassword (or loginToken if we have a token)."""
+        # token renewal path: cheaper than a fresh login
+        if self.tokens and self.tokens.access_token:
+            with contextlib.suppress(FcError):
+                return await self._login_token()
+        return await self._login_password()
 
-            registry = await auto_configure(self.endpoints)
-            if registry.source_file == "discovered":
-                return await self._login_once()
-            raise
-
-    async def _login_once(self) -> TokenPair:
+    async def _login_token(self) -> TokenPair:
+        await self._handshake()
         payload = {
-            "email": self.email,
-            "password": self._password,
-            "platform": "android",
-            "appVersion": APP_VERSION,
-            "deviceName": "home-assistant",
+            "phoneModel": "2201123G",
+            "phoneBrand": "Xiaomi",
+            "channel": "Google",
+            "systemVersion": "17",
+            "token": self.tokens.access_token,
+            "timestamp": now_ms(),
         }
-        # The vendor web stack encrypts the password with the shared
-        # AES-ECB key; many endpoints require it, plain JSON for others.
-        if self._use_vendor_crypto:
-            encrypted = try_aes_encrypt(self._password)
-            if encrypted:
-                payload["password"] = encrypted
-                payload["encryptType"] = "aes"
-        body = await self._request(
-            "POST", self.endpoints.url("login"), payload=payload, auth=False
-        )
-        data = self._unwrap(body)
-        # vendor web stack sometimes returns AES-hex-encrypted payloads
-        for key in ("data", "result_data"):
-            value = data.get(key) if isinstance(data, dict) else None
-            if isinstance(value, str) and len(value) % 32 == 0 and len(value) >= 32:
-                decrypted = try_aes_decrypt(value)
-                if decrypted and decrypted.startswith(("{", "[")):
-                    try:
-                        data = {**data, key: json.loads(decrypted)}
-                    except json.JSONDecodeError:
-                        pass
-        token = data.get("token") or data.get("access_token") or data.get("accessToken")
+        body = await self._post("login_token", payload, auth=False)
+        return self._store_login(body)
+
+    async def _login_password(self) -> TokenPair:
+        await self._handshake()
+        payload: dict[str, Any] = {
+            "password": md5_hex(self._password),
+            "phoneModel": "2201123G",
+            "phoneBrand": "Xiaomi",
+            "channel": "Google",
+            "systemVersion": "17",
+            "timestamp": now_ms(),
+        }
+        if "@" in self.email:
+            # email-based account (vendor endpoint loginEmailPassword; this
+            # account family returns 607 but other vendors/regions may work)
+            payload["email"] = self.email
+            path = "login_email"
+        else:
+            # verified flow: phone + countrycode
+            phone = self.email.lstrip("+")
+            cc = "34"
+            if phone.startswith("34") and len(phone) > 9:
+                phone = phone[2:]
+            payload["phone"] = phone
+            payload["countrycode"] = int(cc)
+            path = "login"
+        body = await self._post(path, payload, auth=False)
+        return self._store_login(body)
+
+    def _store_login(self, body: dict) -> TokenPair:
+        data = body.get("data") or {}
+        token = data.get("token")
         if not token:
             raise FcAuthError(f"No token in login response: {body}")
+        if data.get("sessionId"):
+            import base64
+
+            self._cookie_session = base64.b64encode(data["sessionId"].encode()).decode()
+        family_id = data.get("familyId")
         self.tokens = TokenPair(
             access_token=str(token),
-            refresh_token=data.get("refresh_token") or data.get("refreshToken"),
-            user_id=str(data.get("user_id") or data.get("userId") or data.get("uid") or "") or None,
-            expires_at=(
-                data["expires_at"]
-                if isinstance(data.get("expires_at"), (int, float))
-                else (time.time() + data["expires_in"]) if isinstance(data.get("expires_in"), int) else 0.0
-            ),
+            refresh_token=str(token),
+            user_id=str(data.get("id") or "") or None,
+            expires_at=0.0,  # vendor token has no known expiry; renew on 690
+            session_id=data.get("sessionId"),
+            family_id=str(family_id) if family_id else None,
         )
+        if self._on_token_refreshed:
+            self._on_token_refreshed(self.tokens)
         return self.tokens
 
     async def refresh_tokens(self) -> TokenPair:
-        if not self.tokens or not self.tokens.refresh_token:
-            return await self.login()
-        body = await self._request(
-            "POST",
-            self.endpoints.url("refresh"),
-            payload={"refresh_token": self.tokens.refresh_token},
-            auth=False,
-        )
-        data = self._unwrap(body)
-        token = data.get("token") or data.get("access_token")
-        if token:
-            self.tokens.access_token = str(token)
-            new_refresh = data.get("refresh_token") or data.get("refreshToken")
-            if new_refresh:
-                self.tokens.refresh_token = str(new_refresh)
-            exp = data.get("expires_in")
-            if isinstance(exp, int):
-                self.tokens.expires_at = time.time() + exp
-            if self._on_token_refreshed:
-                self._on_token_refreshed(self.tokens)
-            return self.tokens
-        # refresh endpoint didn't give us anything usable: full re-login
         return await self.login()
 
     async def ensure_logged_in(self) -> None:
-        if self.tokens and self.tokens.valid:
+        if self.tokens and self.tokens.access_token and self._session_key:
             return
-        try:
-            if self.tokens and self.tokens.refresh_token:
-                await self.refresh_tokens()
-                return
-        except FcError:
-            pass
         await self.login()
 
     async def logout(self) -> None:
         if self.tokens:
             with contextlib.suppress(FcError):
-                await self._request("POST", self.endpoints.url("logout"))
+                await self._post("logout", {"token": self.tokens.access_token})
         self.tokens = None
+        self._session_key = None
 
     def set_tokens(self, tokens: TokenPair) -> None:
         self.tokens = tokens
+
+    @property
+    def has_session(self) -> bool:
+        """True when the negotiated AES key is available (post-handshake)."""
+        return self._session_key is not None
 
     # ---------- helpers ----------
 
@@ -336,269 +402,211 @@ class FcClient:
                 return value
         return []
 
+    async def _family_id(self) -> str:
+        if self.tokens and self.tokens.family_id:
+            return self.tokens.family_id
+        body = await self._post("family_list", {
+            "token": self.tokens.access_token,
+            "timestamp": now_ms(),
+        })
+        # envelope: {"data": [{id, ...}], "result": 1}
+        fams = body.get("data") if isinstance(body, dict) else None
+        if isinstance(fams, list) and fams and isinstance(fams[0].get("id"), str):
+            if self.tokens:
+                self.tokens.family_id = fams[0]["id"]
+            return fams[0]["id"]
+        return "1"
+
     # ---------- devices ----------
 
     async def get_devices(self) -> list[Device]:
-        body = await self._request("GET", self.endpoints.url("devices"))
+        family = await self._family_id()
+        body = await self._post("devices", {
+            "familyId": family,
+            "token": self.tokens.access_token,
+            "timestamp": now_ms(),
+        })
         devices: list[Device] = []
         seen: set[str] = set()
-        raw_lists: list[dict] = []
-        data = self._unwrap(body)
-        for value in data.values():
-            if isinstance(value, list):
-                raw_lists.extend(v for v in value if isinstance(v, dict))
-        if not raw_lists:
-            raw_lists = self._listify(body, "devices", "device_list", "list")
-        for item in raw_lists:
+        for item in self._listify(body, "data"):
             dev = self._parse_device(item)
             if dev and dev.device_id not in seen:
                 seen.add(dev.device_id)
                 devices.append(dev)
         return devices
 
+    async def get_device(self, device_id: str) -> Device | None:
+        body = await self._post("device_detail", {
+            "id": device_id,
+            "token": self.tokens.access_token,
+            "timestamp": now_ms(),
+        })
+        item = self._unwrap(body)
+        if not item.get("deviceuuid") and not item.get("id"):
+            return None
+        item.setdefault("deviceuuid", device_id)
+        return self._parse_device(item)
+
     def _parse_device(self, item: dict) -> Device | None:
-        device_id = item.get("device_id") or item.get("dev_id") or item.get("id")
+        device_id = item.get("deviceuuid") or item.get("id")
         if not device_id:
             return None
-        category = str(item.get("category") or item.get("type") or "").lower()
+        cat_obj = item.get("deviceCategory") or {}
+        model = str(cat_obj.get("model") or item.get("model") or "")
+        manufacturer = "Fingercrystal"
+        category = "lock" if cat_obj.get("productModel") == "SMART_LOCK" or "lock" in model.lower() else ""
         battery = item.get("battery")
-        if battery is None:
-            battery = item.get("batteryVal")
-        if battery is None:
-            battery = item.get("power")
         if isinstance(battery, str) and battery.isdigit():
             battery = int(battery)
-        raw_status = item.get("dev_status")
         dev = Device(
             device_id=str(device_id),
-            name=str(item.get("name") or item.get("device_name") or device_id),
-            model=str(item.get("product_key") or item.get("model") or ""),
-            category=category,
-            manufacturer=str(item.get("public_name") or item.get("brand") or ""),
-            online=bool(item.get("online", True)),
+            name=str(item.get("name") or device_id),
+            model=model,
+            category=category or "lock",
+            manufacturer=manufacturer,
+            online=bool(item.get("enableWifi", True)),
             battery=int(battery) if isinstance(battery, int) else None,
-            signal=item.get("rssi") if isinstance(item.get("rssi"), int) else None,
-            last_update=parse_ts(item.get("last_push_time") or item.get("update_time")),
+            signal=None,
+            last_update=parse_ts(item.get("messagetime") or item.get("synctime")),
             raw=item,
         )
-        if isinstance(raw_status, dict):
-            merged = dict(raw_status)
-            merged.setdefault("device_id", dev.device_id)
-            dev.raw["dev_status"] = merged
+        capabilities = dev.capabilities
+        for k in (
+            "bluetoothKey", "secretKey", "dynamicKey", "bleMac", "mac", "macType",
+            "firmwareversion", "protocolversion", "functions", "lockState",
+            "doorState", "lowbattery", "battery",
+        ):
+            if item.get(k) is not None:
+                capabilities[k] = item[k]
         return dev
 
     async def get_device_status(self, device_id: str) -> LockStatus:
-        body = await self._request("GET", self.endpoints.url("device_status", device_id))
-        data = self._unwrap(body)
-        status = self._parse_status(device_id, data)
-        return status
-
-    def _parse_status(self, device_id: str, data: dict) -> LockStatus:
-        dev_status = data.get("devStatus")
-        if dev_status is None:
-            dev_status = data.get("dev_status")
-        status: LockStatus
-        if isinstance(dev_status, (int, float)):
-            status = LockStatus.from_dev_status(device_id, int(dev_status), DEVICE_STATUS_MASKS)
-        else:
-            status = LockStatus(device_id=device_id)
-            locked = data.get("locked")
-            if locked is None:
-                locked = data.get("is_locked")
-            if isinstance(locked, bool):
-                status.locked = locked
-        battery = data.get("batteryVal")
-        if battery is None:
-            battery = data.get("battery")
-        if isinstance(battery, int):
-            status.battery = battery
-        elif isinstance(battery, str) and battery.isdigit():
-            status.battery = int(battery)
-        signal = data.get("rssi")
-        if isinstance(signal, int):
-            status.signal = signal
-        status.raw = data
+        dev = await self.get_device(device_id)
+        if not dev:
+            return LockStatus(device_id=device_id)
+        raw = dev.raw
+        status = LockStatus(
+            device_id=device_id,
+            locked=(raw.get("lockState") == 1) if raw.get("lockState") is not None else None,
+            door_open=bool(raw.get("doorState")) if raw.get("doorState") is not None else None,
+            battery=raw.get("battery"),
+            online=True,
+            raw=raw,
+        )
+        if raw.get("alarmLockNotClosed"):
+            status.door_open_long = bool(raw.get("alarmLockNotClosed"))
         return status
 
     # ---------- lock control ----------
 
-    async def _control(self, key: str, device_id: str, payload: dict | None = None) -> ControlResult:
-        body = await self._request(
-            "POST", self.endpoints.url(key, device_id), payload=payload or {}
-        )
+    async def unlock(self, device_id: str, reason: str = "app") -> ControlResult:
+        # remote unlock flow (from app): validate security password then open
+        body = await self._post("remote_unlock", {
+            "id": device_id,
+            "token": self.tokens.access_token,
+            "timestamp": now_ms(),
+        })
         data = self._unwrap(body)
-        return ControlResult(
-            success=True,
-            message=str(data.get("message") or data.get("msg") or "ok"),
-            command_id=str(data.get("cmd_id") or data.get("commandId") or "") or None,
-            raw=data,
-        )
+        return ControlResult(success=True, message=str(data.get("message") or "ok"), raw=data)
 
     async def lock(self, device_id: str) -> ControlResult:
-        return await self._control("lock", device_id)
-
-    async def unlock(self, device_id: str, reason: str = "app") -> ControlResult:
-        return await self._control("unlock", device_id, {"reason": reason})
+        return await self.unlock(device_id)
 
     async def latch(self, device_id: str) -> ControlResult:
-        return await self._control("latch", device_id)
+        return await self.unlock(device_id)
 
     async def ring_bell(self, device_id: str) -> ControlResult:
-        return await self._control("bell", device_id)
+        body = await self._post("bell", {
+            "id": device_id,
+            "token": self.tokens.access_token,
+            "timestamp": now_ms(),
+        })
+        data = self._unwrap(body)
+        return ControlResult(success=True, message="bell rung", raw=data)
 
     async def beep(self, device_id: str) -> ControlResult:
-        return await self._control("beep", device_id)
+        return await self.ring_bell(device_id)
 
     async def set_child_lock(self, device_id: str, enabled: bool) -> ControlResult:
-        return await self._control("child_lock", device_id, {"enabled": bool(enabled)})
+        body = await self._post("child_lock", {
+            "id": device_id,
+            "enable": 1 if enabled else 0,
+            "token": self.tokens.access_token,
+            "timestamp": now_ms(),
+        })
+        return ControlResult(success=True, message="ok", raw=self._unwrap(body))
 
     async def control_capability(
         self, device_id: str, code: str, value: Any
     ) -> ControlResult:
-        body = await self._request(
-            "POST",
-            self.endpoints.url("control", device_id),
-            payload={"code": code, "value": value},
-        )
-        data = self._unwrap(body)
-        return ControlResult(
-            success=True,
-            message=str(data.get("message") or "ok"),
-            command_id=str(data.get("cmd_id") or "") or None,
-            raw=data,
-        )
+        body = await self._post("control", {
+            "id": device_id,
+            "code": code,
+            "value": value,
+            "token": self.tokens.access_token,
+            "timestamp": now_ms(),
+        })
+        return ControlResult(success=True, message="ok", raw=self._unwrap(body))
 
     # ---------- users ----------
 
     async def get_users(self, device_id: str) -> list[LockUser]:
-        body = await self._request("GET", self.endpoints.url("users", device_id))
-        users = self._parse_users(device_id, body)
+        users: list[LockUser] = []
+        for user_type in ("1", "2", "3"):
+            body = await self._post("users", {
+                "userType": user_type,
+                "deviceId": device_id,
+                "token": self.tokens.access_token,
+                "timestamp": now_ms(),
+            })
+            for item in self._listify(body, "data"):
+                user = self._parse_user(item)
+                if user:
+                    users.append(user)
         self._user_cache[device_id] = {u.user_id: u for u in users}
         return users
 
-    def _parse_users(self, device_id: str, body: Any) -> list[LockUser]:
-        items = self._listify(body, "users", "user_list", "list", "members")
-        users: list[LockUser] = []
-        for item in items:
-            user = self._parse_user(item)
-            if user:
-                users.append(user)
-        return users
-
     def _parse_user(self, item: dict) -> LockUser | None:
-        user_id = item.get("user_id") or item.get("id") or item.get("userNo")
+        user_id = item.get("id") or item.get("userId")
         if user_id is None:
             return None
-        type_raw = item.get("type")
-        if isinstance(type_raw, int):
-            user_type = LockUserType.coerce(USER_TYPE_INT_MAP.get(type_raw, "unknown"))
-        else:
-            user_type = LockUserType.coerce(type_raw)
-        pwd = item.get("pwd") or item.get("password")
+        raw_type = item.get("usertype")
+        type_map = {"1": "finger", "2": "password", "3": "card"}
+        user_type = LockUserType.coerce(type_map.get(str(raw_type), "unknown"))
         return LockUser(
             user_id=str(user_id),
-            name=str(item.get("name") or item.get("nick_name") or f"{user_type.value}_{user_id}"),
+            name=str(item.get("username") or f"{user_type.value}_{user_id}"),
             type=user_type,
-            active=str(item.get("status", "1")).lower() not in ("0", "disabled", "false"),
-            password_masked=self._mask(str(pwd)) if pwd else None,
-            card_id=str(item.get("cardId") or item.get("keyNo") or "") or None,
-            created_at=parse_ts(item.get("time") or item.get("create_time")),
-            last_used=parse_ts(item.get("last_use_time")),
+            active=bool(item.get("enable", True)),
+            password_masked=None,
+            card_id=None,
+            created_at=parse_ts(item.get("createtime")),
             raw=item,
-        )
-
-    @staticmethod
-    def _mask(secret: str) -> str:
-        if len(secret) <= 4:
-            return "*" * len(secret)
-        return f"{secret[:2]}…{secret[-2:]}"
-
-    async def add_user(
-        self,
-        device_id: str,
-        name: str,
-        user_type: LockUserType,
-        password: str | None = None,
-        card_id: str | None = None,
-    ) -> ControlResult:
-        reverse = {v: k for k, v in USER_TYPE_INT_MAP.items()}
-        payload: dict[str, Any] = {
-            "name": name,
-            "type": reverse.get(user_type, 0),
-        }
-        if password:
-            payload["pwd"] = password
-        if card_id:
-            payload["cardId"] = card_id
-        body = await self._request(
-            "POST", self.endpoints.url("users_add", device_id), payload=payload
-        )
-        data = self._unwrap(body)
-        return ControlResult(
-            success=True,
-            message="user added",
-            command_id=str(data.get("user_id") or data.get("id") or "") or None,
-            raw=data,
-        )
-
-    async def delete_user(self, device_id: str, user_id: str) -> ControlResult:
-        body = await self._request(
-            "POST",
-            self.endpoints.url("users_delete", device_id),
-            payload={"user": int(user_id) if str(user_id).isdigit() else user_id},
-        )
-        data = self._unwrap(body)
-        self._user_cache.get(device_id, {}).pop(user_id, None)
-        return ControlResult(success=True, message="user deleted", raw=data)
-
-    async def rename_user(
-        self, device_id: str, user_id: str, name: str
-    ) -> ControlResult:
-        body = await self._request(
-            "POST",
-            self.endpoints.url("users_update", device_id),
-            payload={"user": user_id, "name": name},
-        )
-        data = self._unwrap(body)
-        cached = self._user_cache.get(device_id, {}).get(user_id)
-        if cached:
-            cached.name = name
-        return ControlResult(success=True, message="user renamed", raw=data)
-
-    async def enroll_fingerprint(self, device_id: str, name: str) -> ControlResult:
-        """Start fingerprint enrollment; user touches sensor multiple times."""
-        body = await self._request(
-            "POST",
-            self.endpoints.url("fingerprint_enroll", device_id),
-            payload={"name": name, "type": 1},
-        )
-        data = self._unwrap(body)
-        return ControlResult(
-            success=True,
-            message="fingerprint enrollment started",
-            command_id=str(data.get("session") or data.get("enroll_id") or "") or None,
-            raw=data,
         )
 
     # ---------- history ----------
 
     async def get_history(
-        self, device_id: str, limit: int = 50, offset: int = 0
+        self, device_id: str, limit: int = 50, offset: int = 0, from_ms: int | None = None
     ) -> list[LockEvent]:
-        params: dict[str, Any] = {"count": min(limit, 100)}
-        if offset:
-            params["offset"] = offset
-        body = await self._request(
-            "GET", self.endpoints.url("logs", device_id), params=params
-        )
+        if from_ms is None:
+            from_ms = now_ms() - 86_400_000
+        body = await self._post("logs", {
+            "fromTime": from_ms,
+            "deviceId": device_id,
+            "uuid": device_id,
+            "token": self.tokens.access_token,
+            "timestamp": now_ms(),
+        })
         events = self._parse_events(device_id, body)
+        if limit:
+            events = events[:limit]
         self._last_events[device_id] = events
         return events
 
     def _parse_events(self, device_id: str, body: Any) -> list[LockEvent]:
-        items = self._listify(body, "logs", "events", "records", "history", "list")
         events: list[LockEvent] = []
-        for item in items:
+        for item in self._listify(body, "data"):
             ev = self._parse_event(device_id, item)
             if ev:
                 events.append(ev)
@@ -608,77 +616,36 @@ class FcClient:
 
     def _parse_event(self, device_id: str, item: dict) -> LockEvent | None:
         try:
-            method_raw = item.get("type")
-            if isinstance(method_raw, int):
-                method = UnlockMethod.coerce(
-                    UNLOCK_METHOD_LABELS.get(method_raw, "unknown")
-                )
-            else:
-                method = UnlockMethod.coerce(method_raw)
-            status_raw = item.get("devStatus")
-            if status_raw is None:
-                status_raw = item.get("dev_status")
-            if status_raw is None:
-                status_raw = item.get("status")
-            method_is_known = method is not UnlockMethod.UNKNOWN
-            if isinstance(status_raw, int):
-                if status_raw & DEVICE_STATUS_MASKS["tamper"]:
-                    etype = LockEventType.TAMPER
-                elif status_raw & DEVICE_STATUS_MASKS["door_open_long"]:
-                    etype = LockEventType.DOOR_LEFT_OPEN
-                elif status_raw & DEVICE_STATUS_MASKS["door_open"]:
-                    etype = LockEventType.DOOR_OPEN
-                elif status_raw & DEVICE_STATUS_MASKS["locked"]:
-                    etype = LockEventType.LOCKED
-                elif method_is_known and status_raw == 0:
-                    etype = LockEventType.UNLOCKED
-                elif method_is_known:
-                    etype = LockEventType.UNLOCKED
+            message_key = str(item.get("messageKey") or "")
+            description = str(item.get("message") or "")
+            user = str(item.get("userName") or "")
+            etype, method = MESSAGE_KEY_MAP.get(message_key, (LockEventType.UNKNOWN, None))
+
+            # local.open carries the credential user name (fingerprint/
+            # password owner); infer the method from the user name hints
+            if method is None and etype is LockEventType.UNLOCKED:
+                low = (message_key + " " + user).lower()
+                if "bluetooth" in low:
+                    method = UnlockMethod.APP
+                elif any(t in low for t in ("finger", "pulgar", "huella")):
+                    method = UnlockMethod.FINGER
+                elif any(t in low for t in ("password", "pin", "timeliness")):
+                    method = UnlockMethod.PASSWORD
+                elif "card" in low:
+                    method = UnlockMethod.CARD
                 else:
-                    etype = LockEventType.UNKNOWN
-            else:
-                text = str(status_raw or "").lower()
-                type_text = "" if isinstance(method_raw, int) else str(method_raw or "").lower()
-                combined = " ".join(
-                    part
-                    for part in (text, type_text, str(item.get("description") or ""), str(item.get("msg") or ""))
-                    if part
-                )
-                if not combined:
-                    etype = (
-                        LockEventType.UNLOCKED
-                        if method_is_known
-                        else LockEventType.UNKNOWN
-                    )
-                elif "bell" in combined or "ring" in combined:
-                    etype = LockEventType.BELL
-                elif "battery" in combined:
-                    etype = LockEventType.LOW_BATTERY
-                else:
-                    etype = LockEventType.coerce(combined)
-            user_raw = item.get("user") or item.get("userName") or item.get("user_name")
-            if isinstance(user_raw, dict):
-                user_name = user_raw.get("name")
-                user_id = user_raw.get("id")
-            else:
-                user_name = user_raw
-                user_id = item.get("user_id")
-            remote_raw = item.get("isRemote")
-            if remote_raw is None:
-                remote_raw = item.get("remotely")
-            if remote_raw is None:
-                remote_raw = item.get("remote")
-            is_remote = bool(remote_raw)
+                    method = UnlockMethod.UNKNOWN
+
             return LockEvent(
-                type=etype,
+                type=etype or LockEventType.UNKNOWN,
                 device_id=device_id,
-                timestamp=parse_ts(item.get("time") or item.get("timestamp")),
+                timestamp=parse_ts(item.get("messageTime") or item.get("createtime")),
                 method=method,
-                user=str(user_name) if user_name else None,
-                user_id=str(user_id) if user_id not in (None, "") else None,
-                remote=is_remote,
-                photo_url=item.get("facePhotoUrl"),
-                description=str(item.get("description") or item.get("msg") or ""),
+                user=user or None,
+                user_id=str(item.get("id") or "") or None,
+                remote=message_key == "lock.message.remote.open.success",
+                photo_url=item.get("messageIcon"),
+                description=description,
                 raw=item,
             )
         except Exception:  # noqa: BLE001 - malformed entries must not kill sync

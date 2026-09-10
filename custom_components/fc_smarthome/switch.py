@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.const import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -16,11 +17,11 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    entities = []
-    for device_id, device in coordinator.devices.items():
-        status = coordinator.statuses.get(device_id)
-        if status is not None and status.child_lock is not None:
-            entities.append(FCChildLockSwitch(coordinator, device_id))
+    entities = [
+        FCChildLockSwitch(coordinator, device_id)
+        for device_id, device in coordinator.devices.items()
+        if device.is_lock
+    ]
     async_add_entities(entities)
 
 
@@ -28,7 +29,7 @@ class FCChildLockSwitch(CoordinatorEntity, SwitchEntity):
     _attr_has_entity_name = True
     _attr_name = "Child lock"
     _attr_icon = "mdi:human-child"
-    _attr_entity_category = "config"
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: FcCoordinator, device_id: str) -> None:
         super().__init__(coordinator)

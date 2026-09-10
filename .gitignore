@@ -12,3 +12,5 @@ fc.flows
 .env
 *.env
 !.env.example
+
+.secrets/

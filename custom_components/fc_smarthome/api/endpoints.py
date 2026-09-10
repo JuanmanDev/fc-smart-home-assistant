@@ -41,24 +41,41 @@ DEFAULT_REGIONS: dict[str, str] = {
 }
 
 DEFAULT_PATHS: dict[str, str] = {
-    "login": "/api/app/login",
-    "refresh": "/api/app/token/refresh",
-    "logout": "/api/app/logout",
-    "devices": "/api/app/device/list",
-    "device_status": "/api/app/device/{id}/status",
-    "control": "/api/app/device/{id}/command",
-    "lock": "/api/app/device/{id}/lock",
-    "unlock": "/api/app/device/{id}/unlock",
-    "latch": "/api/app/device/{id}/open",
-    "users": "/api/app/lock/{id}/user/list",
-    "users_add": "/api/app/lock/{id}/user/add",
-    "users_delete": "/api/app/lock/{id}/user/delete",
-    "users_update": "/api/app/lock/{id}/user/update",
-    "fingerprint_enroll": "/api/app/lock/{id}/fingerprint/enroll",
-    "logs": "/api/app/lock/{id}/log/list",
-    "bell": "/api/app/device/{id}/bell",
-    "beep": "/api/app/device/{id}/beep",
-    "child_lock": "/api/app/lock/{id}/child-lock",
+    # verified live 2026-09-09 (see docs/QUE-HACE-LA-APP-FC.md):
+    # all /v2/ + /iot/ paths below are confirmed by mitm capture of app 4.6.6
+    "security_key": "/v2/secure/getSecurityKey",
+    "login": "/v2/login/loginPassword",
+    "login_email": "/v2/login/loginEmailPassword",
+    "login_token": "/v2/login/loginToken",
+    "refresh": "/v2/login/loginToken",
+    "logout": "/v2/account/logout",
+    "user_info": "/v2/account/getUserInfo",
+    "family_list": "/iot/family/familyList",
+    "family_info": "/iot/family/familyInfo",
+    "devices": "/v2/device/getDeviceList",
+    "device_detail": "/v2/device/getDevice",
+    "device_status": "/v2/device/getDevice",
+    "device_categories": "/iot/pageDownload/productCategoryList",
+    "remote_unlock": "/v2/lock/openLock",
+    "control": "/v2/lock/openLock",
+    "lock": "/v2/lock/openLock",
+    "unlock": "/v2/lock/openLock",
+    "latch": "/v2/lock/openLock",
+    "users": "/v2/lock/getLockUserList/v2",
+    "user_detail": "/v2/lock/getLockUser/v2",
+    "users_add": "/v2/lock/addLockUser/v2",
+    "users_delete": "/v2/lock/deleteLockUser",
+    "users_update": "/v2/lock/modifyLockUserName",
+    "fingerprint_enroll": "/v2/wifilock/addFingerprint/v2",
+    "logs": "/v2/lock/getLockMessageList/v2",
+    "bell": "/v2/wifilock/setDoorBellVolume",
+    "beep": "/v2/wifilock/setVolume",
+    "child_lock": "/v2/wifilock/enableChildLock",
+    "anti_lock": "/v2/wifilock/enableAntiLock",
+    "volume": "/v2/wifilock/setVolume",
+    "direction": "/v2/wifilock/setDoorOpenDirection",
+    "validate_security_password": "/v2/device/validateSecurityPassword",
+    "get_local_verify_password": "/v2/device/getLocalVerifyPassword",
 }
 
 DEFAULT_WEBSOCKET: dict[str, Any] = {
@@ -76,10 +93,12 @@ DEFAULT_MQTT: dict[str, Any] = {
 }
 
 DEFAULT_BLE: dict[str, Any] = {
-    "name_prefixes": ["FC", "Yi", "EL", "DX", "K3", "DZ", "SL"],
-    "service_uuid": "0000fe00-0000-1000-8000-00805f9b34fb",
-    "write_characteristic": "0000fe01-0000-1000-8000-00805f9b34fb",
-    "notify_characteristic": "0000fe02-0000-1000-8000-00805f9b34fb",
+    "name_prefixes": ["Smart Lock", "FC", "Yi", "EL", "DX", "K3", "DZ", "SL", "L5"],
+    "scan_filter_uuid": "000001fa-0000-1000-8000-00805f9b34fb",
+    "service_uuid": "0000ffe0-0000-1000-8000-00805f9b34fb",
+    "write_characteristic": "0000ffe1-0000-1000-8000-00805f9b34fb",
+    "notify_characteristic": "0000ffe1-0000-1000-8000-00805f9b34fb",
+    "default_aes_key": "4CADB87095639211A1303639D98E9150",
     "manufacturer_id": None,
     "magic": "FCFC",
 }
@@ -96,7 +115,30 @@ OVERRIDE_FILENAMES = ("fc_smarthome_endpoints.json", "fc_endpoints.json")
 # APK-extracted image/asset base (for face photos, avatars)
 IMAGE_BASE_URL = "http://www.fcsmartlock.com:8060/images/"
 
-VERIFIED_KEYS: set[str] = set()
+VERIFIED_KEYS: set[str] = {
+    "security_key",
+    "login",
+    "login_email",
+    "login_token",
+    "refresh",
+    "user_info",
+    "family_list",
+    "family_info",
+    "devices",
+    "device_detail",
+    "device_categories",
+    "remote_unlock",
+    "unlock",
+    "users",
+    "user_detail",
+    "logs",
+    "child_lock",
+    "anti_lock",
+    "volume",
+    "direction",
+    "validate_security_password",
+    "get_local_verify_password",
+}
 
 
 @dataclass

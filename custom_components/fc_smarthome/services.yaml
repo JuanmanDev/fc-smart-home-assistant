@@ -102,6 +102,30 @@ fetch_history:
       required: true
       selector:
         text:
+import_history:
+  name: Import cloud history
+  description: >-
+    Backfills the lock's full cloud history into Home Assistant: populates
+    the access log and last-unlock sensors, and imports battery readings
+    into the recorder as external statistics (fc_smarthome:<device>_battery)
+    for long-term charts.
+  fields:
+    device_id:
+      name: Device
+      description: The lock device id.
+      required: true
+      selector:
+        text:
+    days:
+      name: Days to import
+      description: How many days back to import. 0 (default) imports the full history.
+      required: false
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 3650
+          mode: box
 ring_bell:
   name: Ring bell
   description: Rings the doorbell.

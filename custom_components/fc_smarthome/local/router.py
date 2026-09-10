@@ -40,6 +40,7 @@ class FcTransportRouter:
         self.lan_hosts = dict(lan_hosts or {})
         self.lan_config = lan_config or LanConfig()
         self._lan: dict[str, FcLanTransport] = {}
+        self._ble_addresses: dict[str, str] = {}
 
     def register_lan(self, device_id: str, host: str, port: int) -> None:
         """Associate a device id with a LAN endpoint (from discovery)."""
@@ -47,6 +48,9 @@ class FcTransportRouter:
 
     def register_ble(self, device_id: str, address: str) -> None:
         """Associate a device id with a BLE address (from scan)."""
+        if not hasattr(self, "_ble_addresses"):
+            self._ble_addresses = {}
+        self._ble_addresses[device_id] = address
         if self.ble_manager is not None:
             self.ble_manager._discovered.setdefault(address, None)
 

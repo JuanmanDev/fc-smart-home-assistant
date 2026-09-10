@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.button import ButtonEntity
+from homeassistant.const import EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -41,7 +42,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 class FCButton(CoordinatorEntity, ButtonEntity):
     _attr_has_entity_name = True
-    _attr_entity_category = "diagnostic"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(
         self,
@@ -68,6 +69,11 @@ class FCButton(CoordinatorEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         if self._action is None:
+            if self.coordinator.router and self.coordinator.router.ble_manager:
+                try:
+                    await self.coordinator.async_sync_ble_records(self.device_id)
+                except Exception as err:
+                    _LOGGER.debug("BLE sync via button failed: %s", err)
             await self.coordinator.async_request_refresh()
             return
         result = await self._action(self.device_id)

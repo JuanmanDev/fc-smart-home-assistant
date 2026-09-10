@@ -2,11 +2,13 @@
   "config": {
     "step": {
       "user": {
-        "title": "FC SmartHome",
+        "title": "FC SmartHome (Fingerchip Smart Lock)",
         "description": "Connect to your FC SmartHome (Fingerchip) account.",
         "data": {
           "email": "Email",
-          "password": "Password",
+          "token": "Session Token (captured from app)",
+          "family_id": "Family ID (optional)",
+          "password": "Password (optional if Token is provided)",
           "region": "Region",
           "endpoints_file": "Optional path to endpoints override JSON (from protocol capture)"
         }
@@ -21,7 +23,8 @@
     },
     "error": {
       "cannot_connect": "Failed to connect to the FC SmartHome cloud.",
-      "invalid_auth": "Invalid email or password."
+      "invalid_auth": "Invalid email or password.",
+      "missing_protocol_secrets": "Protocol secrets missing: place fc_secure_data.json and fc_app_privkey.b64 in the config dir or set FC_SECURE_DATA / FC_PRIVATE_KEY_B64."
     },
     "abort": {
       "already_configured": "This account is already configured.",

@@ -176,6 +176,7 @@ class LockStatus:
     motor_moving: bool | None = None
     battery: int | None = None
     signal: int | None = None
+    online: bool = True
     raw: dict = field(default_factory=dict)
 
     @classmethod
@@ -280,6 +281,8 @@ class TokenPair:
     refresh_token: str | None = None
     user_id: str | None = None
     expires_at: float = 0.0
+    session_id: str | None = None
+    family_id: str | None = None
 
     @property
     def valid(self) -> bool:
@@ -291,6 +294,8 @@ class TokenPair:
             "refresh_token": self.refresh_token,
             "user_id": self.user_id,
             "expires_at": self.expires_at,
+            "session_id": self.session_id,
+            "family_id": self.family_id,
         }
 
     @classmethod
@@ -300,4 +305,6 @@ class TokenPair:
             refresh_token=data.get("refresh_token"),
             user_id=data.get("user_id"),
             expires_at=data.get("expires_at", 0.0),
+            session_id=data.get("session_id"),
+            family_id=data.get("family_id"),
         )

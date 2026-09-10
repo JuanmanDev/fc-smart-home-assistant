@@ -1,13 +1,14 @@
 {
   "domain": "fc_smarthome",
-  "name": "FC SmartHome",
-  "codeowners": ["@JuanMabs22"],
+  "name": "FC SmartHome (Fingerchip Smart Lock)",
+  "codeowners": ["@JuanmanDev"],
   "config_flow": true,
-  "documentation": "https://github.com/JuanMabs22/fc-smart-home-hacs",
-  "issue_tracker": "https://github.com/JuanMabs22/fc-smart-home-hacs/issues",
+  "documentation": "https://github.com/JuanmanDev/fc-smart-home-hacs",
+  "issue_tracker": "https://github.com/JuanmanDev/fc-smart-home-hacs/issues",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "loggers": ["custom_components.fc_smarthome", "fcctl"],
   "requirements": [],
+  "after_dependencies": ["bluetooth"],
   "version": "1.0.0"
 }

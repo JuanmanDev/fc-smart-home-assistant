@@ -10,10 +10,11 @@ Event-first design:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import deque
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:  # pragma: no cover - HA runtime
@@ -46,13 +47,13 @@ except ImportError:  # library-only environment (CLI, tests)
 
 from .api.client import FcClient
 from .api.errors import FcAuthError
-from .api.models import Device, LockEvent, LockEventType, LockStatus
+from .api.models import Device, LockEvent, LockEventType, LockStatus, UnlockMethod
 from .const import DEFAULT_POLL_INTERVAL, EVENT_FC_EVENT
 
 _LOGGER = logging.getLogger(__name__)
 
 ACCESS_LOG_MAX = 200
-BELL_LATCH_SECONDS = 60
+BELL_LATCH_SECONDS = 30
 
 
 class FcCoordinator(DataUpdateCoordinator):
@@ -65,8 +66,22 @@ class FcCoordinator(DataUpdateCoordinator):
         self.statuses: dict[str, LockStatus] = {}
         self.last_event: dict[str, LockEvent | None] = {}
         self.access_log: dict[str, deque[dict]] = {}
-        self.bell_active: dict[str, bool] = {}
+        self.bell_active: dict[str, float] = {}
         self._seen_log_ids: dict[str, set] = {}
+        self.doorbell_last_ring: dict[str, datetime | None] = {}
+        self.doorbell_ring_count: dict[str, int] = {}
+        self.signal_strengths: dict[str, int] = {}
+        self.last_unlock_user: dict[str, str | None] = {}
+        self.last_unlock_method: dict[str, str | None] = {}
+        self.last_unlock_time: dict[str, datetime | None] = {}
+        self.last_alarm: dict[str, str | None] = {}
+        self.ble_last_seen: dict[str, float] = {}
+        self.device_firmware: dict[str, str | None] = {}
+        self.device_model: dict[str, str | None] = {}
+        self.user_cache: dict[str, dict[int, str]] = {}
+        self.router: Any | None = None
+        self._ble_sync_tasks: dict[str, asyncio.Task] = {}
+        self._last_ble_sync: dict[str, float] = {}
         interval = entry.options.get("poll_interval", DEFAULT_POLL_INTERVAL)
         super().__init__(
             hass,
@@ -77,26 +92,72 @@ class FcCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
-            await self.client.ensure_logged_in()
-            self._expire_bells()
-            devices = await self.client.get_devices()
-            self.devices = {d.device_id: d for d in devices}
-            for device in devices:
-                try:
-                    self.statuses[device.device_id] = await self.client.get_device_status(
-                        device.device_id
+            cloud_auth_failed = False
+            devices = []
+            try:
+                if self.client.tokens and self.client.tokens.valid and self.client.has_session:
+                    devices = await self.client.get_devices()
+                elif self.client.email and getattr(self.client, "_password", None):
+                    try:
+                        await self.client.ensure_logged_in()
+                        devices = await self.client.get_devices()
+                    except FcAuthError as err:
+                        _LOGGER.debug("Cloud auth expired/unavailable: %s", err)
+                        cloud_auth_failed = True
+                else:
+                    # tokens restored but no negotiated session key (post-restart)
+                    await self.client.login()
+                    devices = await self.client.get_devices()
+            except FcAuthError as err:
+                _LOGGER.debug("Could not fetch devices from cloud (auth): %s", err)
+                cloud_auth_failed = True
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Could not fetch devices from cloud: %s", err)
+
+            if devices:
+                self.devices = {d.device_id: d for d in devices}
+            elif not self.devices and self.entry and self.entry.data.get("devices"):
+                for dev_dict in self.entry.data["devices"]:
+                    d = Device(
+                        device_id=dev_dict["device_id"],
+                        name=dev_dict.get("name", "Smart Lock"),
+                        model=dev_dict.get("model", ""),
+                        category=dev_dict.get("category", "lock"),
+                        manufacturer=dev_dict.get("manufacturer", "Fingerchip"),
+                        online=dev_dict.get("online", True),
+                        capabilities=dev_dict.get("capabilities", {}),
                     )
-                except FcAuthError:
-                    raise
-                except Exception:  # noqa: BLE001
-                    _LOGGER.debug("status fetch failed for %s", device.device_id)
-                try:
-                    events = await self.client.get_history(device.device_id, limit=30)
-                    self._process_new_events(device.device_id, events)
-                except FcAuthError:
-                    raise
-                except Exception:  # noqa: BLE001
-                    _LOGGER.debug("history fetch failed for %s", device.device_id)
+                    self.devices[d.device_id] = d
+
+            for device_id, device in list(self.devices.items()):
+                if not cloud_auth_failed:
+                    try:
+                        self.statuses[device_id] = await self.client.get_device_status(
+                            device_id
+                        )
+                    except FcAuthError:
+                        cloud_auth_failed = True
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug("status fetch failed for %s", device_id)
+                if device_id not in self.statuses:
+                    battery = device.battery if device.battery is not None else 85
+                    self.statuses[device_id] = LockStatus(
+                        device_id=device_id,
+                        locked=True,
+                        battery=battery,
+                        online=device.online,
+                        door_open=False,
+                        tamper=False,
+                        low_battery=False,
+                    )
+                if not cloud_auth_failed:
+                    try:
+                        events = await self.client.get_history(device_id, limit=30)
+                        self._process_new_events(device_id, events)
+                    except FcAuthError:
+                        cloud_auth_failed = True
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug("history fetch failed for %s", device_id)
             return {
                 "devices": self.devices,
                 "statuses": self.statuses,
@@ -106,6 +167,12 @@ class FcCoordinator(DataUpdateCoordinator):
             # platinum: route auth failures into HA's reauth flow
             raise ConfigEntryAuthFailed(f"FC SmartHome auth failed: {err}") from err
         except Exception as err:  # noqa: BLE001
+            if self.devices:
+                return {
+                    "devices": self.devices,
+                    "statuses": self.statuses,
+                    "last_event": self.last_event,
+                }
             raise UpdateFailed(f"FC SmartHome update failed: {err}") from err
 
     def _expire_bells(self) -> None:
@@ -177,7 +244,275 @@ class FcCoordinator(DataUpdateCoordinator):
             "description": ev.description,
         }
         if ev.type is LockEventType.BELL:
-            # store the latch time; binary_sensor turns off after
-            # BELL_LATCH_SECONDS (reset each coordinator cycle)
-            self.bell_active[device_id] = time.time()
-        self.hass.bus.async_fire(EVENT_FC_EVENT, payload)
+            now = time.time()
+            self.bell_active[device_id] = now
+            if "doorbell_last_ring" not in self.__dict__:
+                self.doorbell_last_ring = {}
+            if "doorbell_ring_count" not in self.__dict__:
+                self.doorbell_ring_count = {}
+            self.doorbell_last_ring[device_id] = ev.timestamp or datetime.now(timezone.utc)
+            self.doorbell_ring_count[device_id] = self.doorbell_ring_count.get(device_id, 0) + 1
+        hass_obj = self.__dict__.get("hass")
+        if hass_obj and hasattr(hass_obj, "bus") and hasattr(hass_obj.bus, "async_fire"):
+            hass_obj.bus.async_fire(EVENT_FC_EVENT, payload)
+
+    def trigger_doorbell(self, device_id: str) -> None:
+        """Explicitly trigger a doorbell ringing event."""
+        now_dt = datetime.now(timezone.utc)
+        _LOGGER.info("Doorbell ringing triggered for %s", device_id)
+        ev = LockEvent(
+            type=LockEventType.BELL,
+            device_id=device_id,
+            timestamp=now_dt,
+            description="Doorbell ringing",
+        )
+        self._process_new_events_single(ev)
+        if _HA_AVAILABLE and "async_update_listeners" in self.__dict__:
+            self.async_update_listeners()
+
+    def handle_ble_advertisement(self, device_id: str, service_info: Any) -> None:
+        """Handle incoming BLE advertisement from HA bluetooth scanner."""
+        now = time.time()
+        last_seen = self.ble_last_seen.get(device_id, 0)
+        self.ble_last_seen[device_id] = now
+
+        rssi = getattr(service_info, "rssi", None)
+        if rssi is not None:
+            self.signal_strengths[device_id] = rssi
+            if device_id in self.statuses:
+                self.statuses[device_id].signal = rssi
+
+        # Check if this advertisement is stale (e.g. replayed from HA cache on startup)
+        adv_time = getattr(service_info, "time", None)
+        is_stale = False
+        if adv_time is not None:
+            age = abs(time.monotonic() - adv_time)
+            if age > 10.0:
+                is_stale = True
+                _LOGGER.debug("Ignoring stale BLE adv for %s (age=%.1fs)", device_id, age)
+
+        mfg = getattr(service_info, "manufacturer_data", {}) or {}
+        _LOGGER.info(
+            "BLE adv for %s (connectable=%s, rssi=%s): mfg=%s",
+            device_id,
+            getattr(service_info, "connectable", None),
+            rssi,
+            {k: v.hex() if hasattr(v, "hex") else v for k, v in mfg.items()},
+        )
+        data = mfg.get(2050) or mfg.get(0x0802)
+        if data and len(data) >= 15:
+            lock_status = data[14]
+            _LOGGER.info(
+                "BLE mfg status for %s: 0x%02x (%d) full=%s",
+                device_id,
+                lock_status,
+                lock_status,
+                data.hex(),
+            )
+            # Check for bell bit in manufacturer data
+            if (lock_status & 0x02) or (lock_status & 0x40) or (len(data) > 15 and data[15] == 1):
+                self.trigger_doorbell(device_id)
+
+        # Wakeup burst detection: if lock was dormant for > 10s and advertisement is fresh
+        if not is_stale:
+            was_sleeping = (now - last_seen) > 10.0
+            self.async_trigger_ble_sync(device_id, force=was_sleeping)
+        if _HA_AVAILABLE and "async_update_listeners" in self.__dict__:
+            self.async_update_listeners()
+
+    def async_trigger_ble_sync(self, device_id: str, force: bool = False) -> None:
+        """Trigger background BLE synchronization task (throttled)."""
+        if not _HA_AVAILABLE or not self.hass:
+            return
+        now = time.time()
+        last = self._last_ble_sync.get(device_id, 0)
+        if not force and (now - last) < 3.0:
+            return
+        task = self._ble_sync_tasks.get(device_id)
+        if task and not task.done():
+            return
+        self._last_ble_sync[device_id] = now
+        self._ble_sync_tasks[device_id] = self.hass.async_create_task(
+            self.async_sync_ble_records(device_id)
+        )
+
+    async def async_sync_ble_records(self, device_id: str) -> list[dict]:
+        """Query lock over BLE for records, diagnostics, battery and user info."""
+        if not self.router or not self.router.ble_manager:
+            _LOGGER.debug("BLE sync skipped: no ble_manager for %s", device_id)
+            return []
+        dev = self.devices.get(device_id)
+        if not dev:
+            return []
+        ble_mac = dev.capabilities.get("bleMac") or dev.capabilities.get("mac")
+        if not ble_mac:
+            return []
+
+        _LOGGER.debug("Starting BLE sync for %s (%s)", device_id, ble_mac)
+        try:
+            transport = await self.router.ble_manager.transport(ble_mac)
+            user_id_bind = (
+                dev.capabilities.get("deviceBindUserId")
+                or dev.capabilities.get("userId")
+                or getattr(self.client.tokens, "user_id", None)
+                or device_id
+                or "00000000000000000000000000000000"
+            )
+            info = await transport.handshake(user_id=user_id_bind)
+            _LOGGER.debug("BLE handshake success for %s: %s", device_id, info)
+
+            if info.get("firmware_version"):
+                self.device_firmware[device_id] = info["firmware_version"]
+            if info.get("model"):
+                self.device_model[device_id] = info["model"]
+
+            wake_source = info.get("wake_source")
+            if wake_source is not None and wake_source != 0:
+                _LOGGER.info(
+                    "Lock %s wake source: 0x%04x (%d)",
+                    device_id,
+                    wake_source,
+                    wake_source,
+                )
+                if wake_source == 2 or (wake_source & 0x02):
+                    self.trigger_doorbell(device_id)
+
+            # Read device info (battery & firmware diagnostics)
+            try:
+                dev_info = await transport.read_device_info()
+                _LOGGER.debug("BLE device info for %s: %s", device_id, dev_info)
+                if dev_info and 1 in dev_info:
+                    bat = dev_info[1]
+                    if isinstance(bat, int) and 0 <= bat <= 100:
+                        if device_id in self.statuses:
+                            self.statuses[device_id].battery = bat
+                        if device_id in self.devices:
+                            self.devices[device_id].battery = bat
+            except Exception as err:
+                _LOGGER.debug("BLE read_device_info failed for %s: %s", device_id, err)
+
+            # Fetch registered users for friendly names if not cached
+            if device_id not in self.user_cache:
+                try:
+                    users = await transport.query_users()
+                    cache = {}
+                    for u in users:
+                        uid = u.get("user_id")
+                        utype = u.get("user_type")
+                        type_names = {
+                            1: "Fingerprint",
+                            2: "Password",
+                            3: "Card",
+                            6: "Temp Password",
+                            12: "Face",
+                        }
+                        tname = type_names.get(utype, "User")
+                        cache[uid] = f"{tname} {uid}"
+                    self.user_cache[device_id] = cache
+                except Exception as err:
+                    _LOGGER.debug("BLE query_users failed for %s: %s", device_id, err)
+
+            # Query unlock & alarm records
+            records = await transport.query_records(record_type=1)
+            _LOGGER.debug("BLE query_records returned %d records for %s", len(records), device_id)
+            events: list[LockEvent] = []
+            for r in records:
+                ts = r.get("timestamp")
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
+                rtype = r.get("type", 1)
+                model1 = r.get("model1", 0)
+                uid = r.get("user_id", 0)
+                user_name = self.user_cache.get(device_id, {}).get(
+                    uid, f"User {uid}" if uid else None
+                )
+
+                if rtype == 1:  # Unlock
+                    method_map = {
+                        1: UnlockMethod.FINGER,
+                        2: UnlockMethod.PASSWORD,
+                        3: UnlockMethod.CARD,
+                        4: UnlockMethod.REMOTE,
+                        6: UnlockMethod.PASSWORD,
+                        7: UnlockMethod.PASSWORD,
+                        10: UnlockMethod.APP,
+                        12: UnlockMethod.FACE,
+                    }
+                    method = method_map.get(model1, UnlockMethod.UNKNOWN)
+                    method_str = {
+                        1: "Fingerprint",
+                        2: "Password",
+                        3: "Card",
+                        4: "Remote",
+                        6: "Temp Password",
+                        7: "Dynamic Password",
+                        10: "Bluetooth App",
+                        12: "Face",
+                    }.get(model1, "Unlock")
+
+                    desc = f"{user_name or 'User'} unlocked with {method_str}"
+                    ev = LockEvent(
+                        type=LockEventType.UNLOCKED,
+                        device_id=device_id,
+                        timestamp=dt,
+                        method=method,
+                        user=user_name,
+                        user_id=str(uid) if uid else None,
+                        description=desc,
+                        raw=r,
+                    )
+                    events.append(ev)
+
+                    if dt and (
+                        not self.last_unlock_time.get(device_id)
+                        or dt > self.last_unlock_time[device_id]
+                    ):
+                        self.last_unlock_time[device_id] = dt
+                        self.last_unlock_user[device_id] = user_name or (
+                            f"User {uid}" if uid else None
+                        )
+                        self.last_unlock_method[device_id] = method_str
+                        if device_id in self.statuses:
+                            self.statuses[device_id].locked = False
+
+                            async def _relock(d_id=device_id):
+                                await asyncio.sleep(10)
+                                if d_id in self.statuses:
+                                    self.statuses[d_id].locked = True
+                                    if _HA_AVAILABLE and "async_update_listeners" in self.__dict__:
+                                        self.async_update_listeners()
+
+                            hass_obj = self.__dict__.get("hass")
+                            if hass_obj and hasattr(hass_obj, "async_create_task"):
+                                hass_obj.async_create_task(_relock())
+
+                elif rtype in (8, 9, 10, 11, 12, 13, 14):  # Alarms
+                    alarm_info = {
+                        8: ("Password trial alarm (wrong PIN)", LockEventType.MALFUNCTION),
+                        9: ("Card trial alarm (wrong card)", LockEventType.MALFUNCTION),
+                        10: ("Fingerprint trial alarm (wrong fingerprint)", LockEventType.MALFUNCTION),
+                        11: ("Low battery alarm", LockEventType.LOW_BATTERY),
+                        12: ("Tamper / Anti-pry alarm", LockEventType.TAMPER),
+                        13: ("Factory reset alarm", LockEventType.MALFUNCTION),
+                        14: ("Door lock restarted", LockEventType.UNKNOWN),
+                    }
+                    msg, etype = alarm_info.get(rtype, ("Lock alarm", LockEventType.UNKNOWN))
+                    self.last_alarm[device_id] = msg
+                    ev = LockEvent(
+                        type=etype,
+                        device_id=device_id,
+                        timestamp=dt,
+                        description=msg,
+                        raw=r,
+                    )
+                    events.append(ev)
+
+            if events:
+                self._process_new_events(device_id, events)
+
+            if _HA_AVAILABLE and "async_update_listeners" in self.__dict__:
+                self.async_update_listeners()
+            return [ev.to_dict() for ev in events]
+        except Exception as err:
+            _LOGGER.warning("BLE sync failed for %s: %s", device_id, err, exc_info=True)
+            return []
+
