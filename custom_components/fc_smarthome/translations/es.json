@@ -1,0 +1,76 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "FC SmartHome (Cerradura Inteligente Fingerchip)",
+        "description": "Conectate a tu cuenta de FC SmartHome (Fingerchip).",
+        "data": {
+          "email": "Correo o Telefono con Prefijo (ej. +34600112233 o correo@ejemplo.com)",
+          "country_code": "Prefijo telefonico (solo digitos, ej. 34)",
+          "token": "Token de sesion (capturado de la app)",
+          "family_id": "ID de Familia (opcional)",
+          "password": "Contrasena (opcional si se proporciona Token)",
+          "region": "Region",
+          "endpoints_file": "Ruta opcional a JSON de endpoints (captura de protocolo)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reautenticar FC SmartHome",
+        "description": "Las credenciales guardadas para {email} ya no son validas.",
+        "data": {
+          "password": "Contrasena"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Error al conectar con la nube de FC SmartHome.",
+      "invalid_auth": "Correo o contrasena no validos.",
+      "missing_protocol_secrets": "Faltan secretos del protocolo: coloca fc_secure_data.json y fc_app_privkey.b64 en el directorio de configuracion o define FC_SECURE_DATA / FC_PRIVATE_KEY_B64."
+    },
+    "abort": {
+      "already_configured": "Esta cuenta ya esta configurada.",
+      "reauth_successful": "Reautenticacion exitosa."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opciones de FC SmartHome",
+        "data": {
+          "poll_interval": "Intervalo de sondeo (segundos, min 15)",
+          "local_lan": "Habilitar control local LAN (cerraduras WiFi / pasarelas, local-first)",
+          "local_ble": "Habilitar control local Bluetooth (BLE / ESPHome proxy)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": { "name": "Batería" },
+      "signal": { "name": "Señal" },
+      "last_event": { "name": "Último evento" },
+      "last_unlock_user": { "name": "Último usuario" },
+      "last_unlock_method": { "name": "Método de apertura" },
+      "last_unlock_time": { "name": "Hora de apertura" },
+      "doorbell_last_ring": { "name": "Última llamada timbre" },
+      "doorbell_ring_count": { "name": "Contador de timbre" },
+      "last_alarm": { "name": "Última alarma" },
+      "firmware_version": { "name": "Versión firmware" },
+      "ble_mac": { "name": "Dirección MAC Bluetooth" }
+    },
+    "binary_sensor": {
+      "door": { "name": "Puerta" },
+      "tamper": { "name": "Sabotaje" },
+      "door_open_long": { "name": "Puerta abierta demasiado tiempo" },
+      "motor_error": { "name": "Error de motor" },
+      "low_battery": { "name": "Batería baja" },
+      "bell_ringing": { "name": "Timbre sonando" },
+      "ble_in_range": { "name": "Bluetooth en alcance" }
+    },
+    "button": {
+      "ring_bell": { "name": "Hacer sonar timbre" },
+      "beep": { "name": "Localizar" },
+      "sync": { "name": "Sincronizar ahora" }
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "FC SmartHome (Fingerchip Smart Lock)",
+        "description": "Connect to your FC SmartHome (Fingerchip) account.",
+        "data": {
+          "email": "Email or Phone with Country Code (e.g. +34600112233 or user@example.com)",
+          "country_code": "Phone country code (digits only, e.g. 34)",
+          "token": "Session Token (captured from app)",
+          "family_id": "Family ID (optional)",
+          "password": "Password (optional if Token is provided)",
+          "region": "Region",
+          "endpoints_file": "Optional path to endpoints override JSON (from protocol capture)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate FC SmartHome",
+        "description": "The stored credentials for {email} are no longer valid.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the FC SmartHome cloud.",
+      "invalid_auth": "Invalid email or password.",
+      "missing_protocol_secrets": "Protocol secrets missing: place fc_secure_data.json and fc_app_privkey.b64 in the config dir or set FC_SECURE_DATA / FC_PRIVATE_KEY_B64."
+    },
+    "abort": {
+      "already_configured": "This account is already configured.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "FC SmartHome options",
+        "data": {
+          "poll_interval": "Poll interval (seconds, min 15)",
+          "local_lan": "Enable local LAN control (WiFi locks / gateways, local-first)",
+          "local_ble": "Enable local Bluetooth control (requires bleak + USB/BlueZ adapter or ESPHome proxy)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": { "name": "Battery" },
+      "signal": { "name": "Signal" },
+      "last_event": { "name": "Last event" },
+      "last_unlock_user": { "name": "Last unlock user" },
+      "last_unlock_method": { "name": "Last unlock method" },
+      "last_unlock_time": { "name": "Last unlock time" },
+      "doorbell_last_ring": { "name": "Last doorbell ring" },
+      "doorbell_ring_count": { "name": "Doorbell ring count" },
+      "last_alarm": { "name": "Last alarm" },
+      "firmware_version": { "name": "Firmware version" },
+      "ble_mac": { "name": "Bluetooth MAC" }
+    },
+    "binary_sensor": {
+      "door": { "name": "Door" },
+      "tamper": { "name": "Tamper" },
+      "door_open_long": { "name": "Door open too long" },
+      "motor_error": { "name": "Motor error" },
+      "low_battery": { "name": "Low battery" },
+      "bell_ringing": { "name": "Bell ringing" },
+      "ble_in_range": { "name": "Bluetooth in range" }
+    },
+    "button": {
+      "ring_bell": { "name": "Ring bell" },
+      "beep": { "name": "Locate" },
+      "sync": { "name": "Sync now" }
+    }
+  }
+}

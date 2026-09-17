@@ -1,0 +1,189 @@
+add_user:
+  name: Add user
+  description: Adds a passcode, card or NFC user to a FC SmartHome lock.
+  fields:
+    device_id:
+      name: Device
+      description: The lock device id.
+      required: true
+      example: "1234567890"
+      selector:
+        text:
+    name:
+      name: Name
+      description: Display name for the user.
+      required: true
+      example: "Guest"
+      selector:
+        text:
+    user_type:
+      name: User type
+      description: Credential type to register.
+      required: true
+      selector:
+        select:
+          options:
+            - label: "Password / passcode"
+              value: "password"
+            - label: "Card"
+              value: "card"
+            - label: "NFC"
+              value: "nfc"
+            - label: "Fingerprint"
+              value: "finger"
+    password:
+      name: Passcode
+      description: The numeric passcode (only for password type).
+      required: false
+      example: "8462"
+      selector:
+        text:
+    card_id:
+      name: Card ID
+      description: Card/tag identifier (only for card/NFC types).
+      required: false
+      selector:
+        text:
+delete_user:
+  name: Delete user
+  description: Removes a user from a FC SmartHome lock.
+  fields:
+    device_id:
+      name: Device
+      description: The lock device id.
+      required: true
+      selector:
+        text:
+    user_id:
+      name: User ID
+      description: The lock user id to remove.
+      required: true
+      selector:
+        text:
+rename_user:
+  name: Rename user
+  description: Renames an existing lock user (e.g. a fingerprint slot).
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        text:
+    user_id:
+      name: User ID
+      required: true
+      selector:
+        text:
+    name:
+      name: Name
+      required: true
+      selector:
+        text:
+enroll_fingerprint:
+  name: Enroll fingerprint
+  description: Starts fingerprint enrollment; touch the sensor on the lock several times.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        text:
+    name:
+      name: Name
+      required: true
+      selector:
+        text:
+fetch_history:
+  name: Fetch history
+  description: Pulls up to 100 recent access events and returns them (and fires events).
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        text:
+import_history:
+  name: Import cloud history
+  description: >-
+    Backfills the lock's full cloud history into Home Assistant: populates
+    the access log and last-unlock sensors, and imports battery readings
+    into the recorder as external statistics (fc_smarthome:<device>_battery)
+    for long-term charts.
+  fields:
+    device_id:
+      name: Device
+      description: The lock device id.
+      required: true
+      selector:
+        text:
+    days:
+      name: Days to import
+      description: How many days back to import. 0 (default) imports the full history.
+      required: false
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 3650
+          mode: box
+ring_bell:
+  name: Ring bell
+  description: Rings the doorbell.
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        text:
+locate_device:
+  name: Locate device
+  description: Makes the device beep to locate it (useful for safes).
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        text:
+set_child_lock:
+  name: Set child lock
+  description: Enables or disables child lock (blocks manual unlock from inside).
+  fields:
+    device_id:
+      name: Device
+      required: true
+      selector:
+        text:
+    enabled:
+      name: Enabled
+      required: true
+      selector:
+        boolean:
+
+ble_probe:
+  name: BLE probe
+  description: >
+    Diagnostic: scan -> GATT connect -> protocol handshake with the lock over
+    BLE (through the ESPHome Bluetooth proxies). Read-only: does NOT unlock.
+  fields:
+    device_id:
+      name: Device
+      description: The lock device id.
+      required: true
+      example: "1234567890"
+      selector:
+        text:
+
+ble_unlock:
+  name: BLE unlock
+  description: >
+    Unlock the door over BLE via the ESPHome Bluetooth proxies (local channel;
+    works even when the cloud openLock path is asleep). Requires 'local ble'
+    enabled in the integration options.
+  fields:
+    device_id:
+      name: Device
+      description: The lock device id.
+      required: true
+      example: "1234567890"
+      selector:
+        text:

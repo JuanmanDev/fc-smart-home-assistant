@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fcctl"
+version = "1.0.0"
+description = "CLI for FC SmartHome (Fingerchip) smart locks"
+requires-python = ">=3.11"
+dependencies = ["aiohttp>=3.9", "bleak>=0.21; sys_platform == 'win32' or sys_platform == 'linux'"]
+
+[project.scripts]
+fcctl = "fcctl.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["fcctl*"]

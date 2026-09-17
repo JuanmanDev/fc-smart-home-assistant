@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+endpoint_probe_report.json
+.fcsmarthome/
+fc.flows
+*.btsnoop
+# credentials — NEVER commit
+.env
+*.env
+!.env.example
+
+.secrets/
+.opencode/
