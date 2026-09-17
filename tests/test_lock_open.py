@@ -11,9 +11,7 @@ homeassistant.* is stubbed so these run without a HA install.
 
 from __future__ import annotations
 
-import asyncio
 import sys
-import time
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -68,7 +66,6 @@ sys.modules.setdefault("homeassistant.helpers.device_registry", _dr)
 sys.modules.setdefault("homeassistant.helpers.update_coordinator", _uc)
 
 from custom_components.fc_smarthome.lock import (  # noqa: E402
-    CLOUD_RETRY_INTERVAL,
     FCLock,
     WAKE_GUIDANCE,
 )

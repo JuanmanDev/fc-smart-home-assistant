@@ -124,7 +124,6 @@ async def _open_client(args):
         raise RuntimeError("lock not seen by any proxy - wake it (bell/keypad) and rerun")
     bridge, rssi = best
     print(f"using proxy {bridge.name} (rssi {rssi}dBm)")
-    from fcble.client import FcBleLockClient
     # build a client whose transport goes through this proxy
     client = ProxyFcBleLockClient(bridge, args.mac, args.lockid, args.key)
     await client.connect()
@@ -139,7 +138,6 @@ class ProxyFcBleLockClient(FcBleLockClient):
         self._bridge = bridge
 
     async def connect(self, timeout: float = 15.0) -> bool:
-        from bleak_esphome.backend.client import ESPHomeClient
         self._client = await self._bridge.gatt_connect(self.address)
         from fcble import FC_NOTIFY_CHAR_UUID
         from fcble import FcBleFrameParser

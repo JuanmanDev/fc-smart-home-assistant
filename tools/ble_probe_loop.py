@@ -51,7 +51,7 @@ async def main() -> int:
                 print("  no advertisement; wake the lock (bell/keypad) and keep watching")
                 await asyncio.sleep(5)
                 continue
-            print(f"  advertisement seen, connecting GATT...")
+            print("  advertisement seen, connecting GATT...")
             await asyncio.wait_for(client.connect(), timeout=25.0)
             print("  connected! sending handshake (chunked 20B writes)...")
             info = await client.handshake(timeout=15.0)

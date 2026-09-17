@@ -19,7 +19,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fcble import (
-    CATEGORY_SPECIAL,
     DEFAULT_BLE_KEY,
     FcBleFrameParser,
     FcBleMessage,
@@ -70,8 +69,8 @@ def main() -> int:
           f"idx={msgs[0][0].index})" if msgs else "  parser: no messages")
 
     # 5) crypto round-trip of our own handshake message
-    from fcble import make_handshake, make_open
-    hs = make_handshake("7b120ba58284f360699d44cebaba0a12")
+    from fcble import make_handshake
+    hs = make_handshake("00000000000000000000000000000000")
     plain = hs.to_bytes()
     ok_hs_shape = (
         len(hs.data) == 39

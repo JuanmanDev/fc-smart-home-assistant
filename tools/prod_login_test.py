@@ -85,7 +85,7 @@ async def main() -> int:
         print("[2/5] Authenticating with FC cloud...")
         tokens = await client.login()
         masked_token = _mask(tokens.access_token)
-        print(f"      OK - Logged in successfully!")
+        print("      OK - Logged in successfully!")
         print(f"      Token: {masked_token} | User ID: {tokens.user_id}")
 
         # 3. Devices
@@ -107,7 +107,7 @@ async def main() -> int:
             print(f"        Tamper:      {status.tamper}")
 
             # 5. Users & History
-            print(f"[5/5] Checking users & event history:")
+            print("[5/5] Checking users & event history:")
             try:
                 users = await client.get_users(dev.device_id)
                 print(f"        Users:       {len(users)} registered")

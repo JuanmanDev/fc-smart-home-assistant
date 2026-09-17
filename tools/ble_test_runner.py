@@ -31,12 +31,10 @@ unreachable from the outside. Results are also left in
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 HA_HOST = os.environ.get("HA_HOST", "root@<ha-ip>")
 HA_CONTAINER = os.environ.get("HA_CONTAINER", "homeassistant")
