@@ -2,8 +2,9 @@
   <img src="images/icon.png" width="128" height="128" alt="FC SmartHome logo">
 </p>
 
-# FC SmartHome HACS
+# FC SmartHome for Home Assistant
 
+[![CI](https://github.com/JuanmanDev/fc-smart-home-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanmanDev/fc-smart-home-assistant/actions/workflows/ci.yml)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-red.svg)](https://github.com/hacs/integration)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -32,8 +33,9 @@ app for everything you'd want from a home-automation hub:
 | Signal strength | ✅ | | `sensor.*_signal` |
 | Who unlocked, how | ✅ | ✅ | `sensor.*_last_event` + `event.*` |
 | Access history | ✅ | | `fc_smarthome.fetch_history` |
-| Ring doorbell | ✅ | ✅ | `button.*_ring_bell` |
-| Beep / locate safe | ✅ | ✅ | `button.*_beep` |
+| Doorbell ring detection | ✅ | ✅ | `binary_sensor.*_bell_ringing` + `sensor.*_last_doorbell_ring` |
+| Ring doorbell (remote) | ⚠️ hardware dependent | ⚠️ | `button.*_ring_bell` (disabled by default) |
+| Beep / locate safe | ⚠️ hardware dependent | ⚠️ | `button.*_beep` (disabled by default) |
 | Child lock mode | ✅ | | `switch.*_child_lock` |
 | List users (finger/pass/card/NFC) | ✅ | | `fcctl users` |
 | Add user (passcode, card id) | ✅ | | `fc_smarthome.add_user` |
@@ -296,9 +298,21 @@ data: { device_id: "<device-id>" }
 action: fc_smarthome.set_child_lock
 data: { device_id: "<device-id>", enabled: true }
 
-# pull 100 history entries into the log
+# unlock over BLE via ESPHome Bluetooth proxy (local channel)
+action: fc_smarthome.ble_unlock
+data: { device_id: "<device-id>" }
+
+# diagnostic BLE handshake test (read-only)
+action: fc_smarthome.ble_probe
+data: { device_id: "<device-id>" }
+
+# pull recent history entries into the log
 action: fc_smarthome.fetch_history
 data: { device_id: "<device-id>" }
+
+# full history backfill + recorder battery statistics
+action: fc_smarthome.import_history
+data: { device_id: "<device-id>", days: 0 }
 ```
 
 ### Options

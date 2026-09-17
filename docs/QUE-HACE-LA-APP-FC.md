@@ -117,7 +117,7 @@ más en vivo. Para volverlo "real" hace falta **captura mitmproxy del app**
 
 1. **Credenciales reales commiteadas en claro** en `tools/prod_login_test.py`
    y `tools/gate_test.py` (teléfono, código país, password). El README apunta a
-   **repo GitHub público** (`github.com/JuanmanDev/fc-smart-home-hacs`). Si esos
+   **repo GitHub público** (`github.com/JuanmanDev/fc-smart-home-assistant`). Si esos
    ficheros están en el repo público, **tu cuenta FC queda expuesta**.
    → Acción: quitar los ficheros del repo, rotar la password, `git filter-repo`
    o rehacer el historial si ya se pusheó.
