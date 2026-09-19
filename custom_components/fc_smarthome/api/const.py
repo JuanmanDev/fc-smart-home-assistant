@@ -20,6 +20,7 @@ CONF_ENDPOINTS_FILE = "endpoints_file"
 CONF_SECURE_DATA = "secure_data"
 CONF_PRIVATE_KEY = "private_key"
 CONF_COUNTRY_CODE = "country_code"
+CONF_CONCURRENT_UNLOCK = "concurrent_unlock"
 
 
 DEFAULT_POLL_INTERVAL = 30

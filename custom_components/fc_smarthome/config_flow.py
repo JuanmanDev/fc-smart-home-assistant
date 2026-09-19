@@ -14,6 +14,7 @@ from .api.endpoints import EndpointRegistry
 from .api.errors import FcAuthError, FcError
 from .const import (
     CONF_COUNTRY_CODE,
+    CONF_CONCURRENT_UNLOCK,
     CONF_EMAIL,
     CONF_ENDPOINTS_FILE,
     CONF_FAMILY_ID,
@@ -185,6 +186,7 @@ class FCSmartHomeConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_LOCAL_BLE: True,
                             CONF_LOCAL_LAN: True,
                             CONF_POLL_INTERVAL: 30,
+                            CONF_CONCURRENT_UNLOCK: True,
                         },
                     )
                 errors = result.get("errors", {})
@@ -248,6 +250,10 @@ class FCSmartHomeOptionsFlow(OptionsFlow):
                     vol.Optional(
                         CONF_LOCAL_BLE,
                         default=current.get(CONF_LOCAL_BLE, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_CONCURRENT_UNLOCK,
+                        default=current.get(CONF_CONCURRENT_UNLOCK, True),
                     ): bool,
                 }
             ),

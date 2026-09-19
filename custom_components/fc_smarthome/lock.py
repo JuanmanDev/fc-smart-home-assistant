@@ -19,7 +19,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_CONCURRENT_UNLOCK, DOMAIN
 from .coordinator import FcCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -226,46 +226,98 @@ class FCLock(CoordinatorEntity, LockEntity):
         finally:
             self._set_busy(None)
 
+    def _concurrent_unlock_enabled(self) -> bool:
+        entry = getattr(self.coordinator, "config_entry", None)
+        if entry is not None and hasattr(entry, "options") and isinstance(entry.options, dict):
+            return bool(entry.options.get(CONF_CONCURRENT_UNLOCK, False))
+        return False
+
+    async def _concurrent_unlock(self) -> None:
+        """Race BLE unlock and Cloud unlock concurrently.
+
+        Whichever unlatches the door first wins and cancels the other.
+        If BLE fails or is out of range, the cloud retry loop continues
+        uninterrupted until its deadline.
+        """
+        import asyncio
+        import contextlib
+
+        ble_task = asyncio.create_task(self._try_ble_unlock())
+        cloud_task = asyncio.create_task(self._cloud_unlock_with_retries())
+
+        try:
+            done, _ = await asyncio.wait(
+                [ble_task, cloud_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if ble_task in done:
+                try:
+                    if ble_task.result():
+                        _LOGGER.info(
+                            "Concurrent unlock: BLE succeeded first for %s",
+                            self.device_id,
+                        )
+                        cloud_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await cloud_task
+                        return
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("BLE task raised: %s", err)
+            # If BLE finished with False or Cloud finished first:
+            await cloud_task
+        finally:
+            if not ble_task.done():
+                ble_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ble_task
+            if not cloud_task.done():
+                cloud_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await cloud_task
+
     async def async_unlock(self, **kwargs):
-        """Open the door. The state stays truthful (locked) while the BLE
-        exchange runs — the UI sees action="opening" (spinner) until the
-        lock confirms, then a refresh flips the state for real."""
+        """Open the door. If concurrent unlock is enabled and BLE is available,
+        races BLE and Cloud/WiFi simultaneously (whichever unlatches first wins).
+        Otherwise falls back to sequential BLE-first then Cloud with retries."""
         if self._busy:
             raise HomeAssistantError("A lock command is already running")
         self._set_busy("opening")
         try:
-            if self._ble_available():
-                # BLE can wake the lock itself — the reliable local path
-                if await self._try_ble_unlock():
-                    await self.coordinator.async_request_refresh()
-                    return
-                _LOGGER.info(
-                    "BLE unlock unavailable for %s; falling back to cloud",
-                    self.device_id,
-                )
-            await self._cloud_unlock_with_retries()
+            if self._concurrent_unlock_enabled() and self._ble_available():
+                await self._concurrent_unlock()
+            else:
+                if self._ble_available():
+                    if await self._try_ble_unlock():
+                        await self.coordinator.async_request_refresh()
+                        return
+                    _LOGGER.info(
+                        "BLE unlock unavailable for %s; falling back to cloud",
+                        self.device_id,
+                    )
+                await self._cloud_unlock_with_retries()
             await self.coordinator.async_request_refresh()
         finally:
             self._set_busy(None)
 
     async def async_open(self, **kwargs):
-        """Latch-open = unlock for the L5: BLE not supported for latch and
-        the cloud latch endpoint is the same openLock call, so reuse the
-        unlock flow (BLE-first, then cloud with the 60s retry window and
-        wake guidance instead of a cryptic error)."""
+        """Latch-open = unlock for the L5: races BLE and Cloud/WiFi
+        simultaneously if enabled, otherwise BLE-first with cloud fallback."""
         if self._busy:
             raise HomeAssistantError("A lock command is already running")
         self._set_busy("opening")
         try:
-            if self._ble_available():
-                if await self._try_ble_unlock():
-                    await self.coordinator.async_request_refresh()
-                    return
-                _LOGGER.info(
-                    "BLE open unavailable for %s; falling back to cloud",
-                    self.device_id,
-                )
-            await self._cloud_unlock_with_retries()
+            if self._concurrent_unlock_enabled() and self._ble_available():
+                await self._concurrent_unlock()
+            else:
+                if self._ble_available():
+                    if await self._try_ble_unlock():
+                        await self.coordinator.async_request_refresh()
+                        return
+                    _LOGGER.info(
+                        "BLE open unavailable for %s; falling back to cloud",
+                        self.device_id,
+                    )
+                await self._cloud_unlock_with_retries()
             await self.coordinator.async_request_refresh()
         finally:
             self._set_busy(None)

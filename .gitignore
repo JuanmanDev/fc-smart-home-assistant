@@ -15,3 +15,8 @@ fc.flows
 
 .secrets/
 .opencode/
+*.pcap
+*.log
+*.txt
+tools/controller_bundle/
+

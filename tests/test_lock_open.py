@@ -200,3 +200,37 @@ def test_retry_constants_match_wake_window():
     import custom_components.fc_smarthome.lock as lock_mod
     assert lock_mod.CLOUD_RETRY_SECONDS >= 55
     assert lock_mod.CLOUD_RETRY_INTERVAL <= 10
+
+
+@pytest.mark.asyncio
+async def test_concurrent_unlock_ble_wins(monkeypatch):
+    """When concurrent unlock is enabled and BLE succeeds, it unlatches immediately."""
+    from custom_components.fc_smarthome.const import CONF_CONCURRENT_UNLOCK
+
+    _short_window(monkeypatch)
+    lock, counters = _make_lock(ble_available=True, ble_result="ok")
+    entry = MagicMock()
+    entry.options = {CONF_CONCURRENT_UNLOCK: True}
+    lock.coordinator.config_entry = entry
+
+    await lock.async_unlock()
+    counters["router_unlock"].assert_awaited_once_with("d1")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_unlock_ble_fails_cloud_succeeds(monkeypatch):
+    """When concurrent unlock is enabled and BLE fails, cloud succeeds without raising."""
+    from custom_components.fc_smarthome.const import CONF_CONCURRENT_UNLOCK
+
+    _short_window(monkeypatch)
+    lock, counters = _make_lock(ble_available=True, ble_result="fail")
+    entry = MagicMock()
+    entry.options = {CONF_CONCURRENT_UNLOCK: True}
+    lock.coordinator.config_entry = entry
+    # make cloud unlock succeed
+    lock.coordinator.client.unlock = AsyncMock(return_value=MagicMock(success=True))
+
+    await lock.async_unlock()
+    counters["router_unlock"].assert_awaited_once_with("d1")
+    lock.coordinator.client.unlock.assert_awaited()
+

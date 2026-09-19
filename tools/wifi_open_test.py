@@ -1,8 +1,8 @@
 """WiFi-only (cloud) open test: NO Bluetooth at all.
 
 Usage:
-    python tools\\wifi_open_test.py            # countdown, then fire openLock
-    python tools\\wifi_open_test.py --watch    # auto-fire when lock wakes
+    python tools\wifi_open_test.py            # countdown, then fire openLock
+    python tools\wifi_open_test.py --watch    # auto-fire when lock wakes
 
 Pure WiFi path, exactly what the HA integration does when no ESP32
 Bluetooth proxy exists: login -> POST /v2/lock/openLock -> retry for a
@@ -12,8 +12,6 @@ ring the bell) -> report.
 Exit codes: 0 = openLock succeeded, 1 = lock never woke in the window,
 2 = lock woke but openLock still failed (would be a real bug).
 """
-
-from __future__ import annotations
 
 import argparse
 import asyncio
@@ -25,6 +23,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from custom_components.fc_smarthome.api.client import FcClient
+from custom_components.fc_smarthome.api.endpoints import EndpointRegistry
+from custom_components.fc_smarthome.api.errors import FcError
 
 
 def _load_env_file() -> None:
@@ -38,20 +39,16 @@ def _load_env_file() -> None:
             os.environ.setdefault(k.strip(), v.strip())
 
 
-async def _openlock_once(client, device: str) -> None:
-    body = await client._post("remote_unlock", {
-        "id": device,
-        "token": client.tokens.access_token,
-        "timestamp": int(time.time() * 1000),
-    })
-    print(f"  [openLock] SUCCESS: {json.dumps(body)[:200]}")
+def _event_ts(e) -> str:
+    if hasattr(e, "timestamp") and e.timestamp is not None:
+        ts = e.timestamp
+        return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+    if isinstance(e, dict):
+        return str(e.get("timestamp") or "")
+    return ""
 
 
 async def run(device: str, wait_secs: int, watch: bool) -> int:
-    from custom_components.fc_smarthome.api.client import FcClient
-    from custom_components.fc_smarthome.api.endpoints import EndpointRegistry
-    from custom_components.fc_smarthome.api.errors import FcError
-
     _load_env_file()
     region = os.environ.get("FC_REGION", "eu")
     registry = EndpointRegistry.load(region)
@@ -62,69 +59,86 @@ async def run(device: str, wait_secs: int, watch: bool) -> int:
         registry,
         country_code=os.environ.get("FC_CC", "34"),
     )
-    await client.login()
-    print(f"[login] OK (region={region}) — WiFi-only test, BLE disabled")
-
-    if not watch:
-        print()
-        print("=" * 62)
-        print("  WAKE THE LOCK NOW: press 4 then # on the keypad")
-        print(f"  openLock fires in 10 seconds and retries for {wait_secs} s")
-        print("=" * 62)
-        for i in range(10, 0, -1):
-            print(f"  {i}...")
-            await asyncio.sleep(1)
-    else:
-        baseline = await client.get_history(device, limit=5)
-        known = {e.timestamp.isoformat() for e in baseline if e.timestamp}
-        print(f"[watch] {len(known)} recent events known; ring the bell /")
-        print("  touch the keypad — openLock fires the moment a new event")
-        print(f"  appears (max wait {wait_secs} s)")
-
-    deadline = time.time() + wait_secs
-    attempt = 0
-    fired = False
-    while time.time() < deadline:
-        attempt += 1
+    try:
         try:
-            await _openlock_once(client, device)
-            print(f"  [attempt {attempt}] openLock succeeded — "
-                  "the WiFi/Wake theory is CONFIRMED end to end")
-            await client.close()
-            return 0
+            await client.login()
         except FcError as err:
-            msg = str(err)
-            fired = True
-            if "682" in msg or "500" in msg:
-                left = deadline - time.time()
-                print(f"  [attempt {attempt}] lock asleep (HTTP 682) — "
-                      f"retrying for {max(left, 0):.0f}s more "
-                      "(press 4 + # / ring the bell)")
-            else:
-                print(f"  [attempt {attempt}] {msg[:130]}")
-                await client.close()
-                return 2
-        if watch:
-            try:
-                events = await client.get_history(device, limit=5)
-                fresh = [e for e in events
-                         if e.timestamp and e.timestamp.isoformat() not in known]
-                for e in fresh:
-                    known.add(e.timestamp.isoformat())
-                if fresh:
-                    print(f"  [watch] wake event: {fresh[0].type.value} "
-                          f"at {fresh[0].timestamp} — firing immediately")
-            except FcError:
-                pass
-        await asyncio.sleep(3)
+            print(f"[login] FAILED: {err}")
+            return 1
+        print(f"[login] OK (region={region}) — WiFi-only test, BLE disabled")
 
-    await client.close()
-    if fired:
-        print("RESULT: lock never woke during the window. Check the lock's")
-        print("WiFi (blue LED on / visible in the app) and try again.")
+        if not watch:
+            print()
+            print("=" * 62)
+            print("  WAKE THE LOCK NOW: press 4 then # on the keypad")
+            print(f"  openLock fires in 10 seconds and retries for {wait_secs} s")
+            print("=" * 62)
+            for i in range(10, 0, -1):
+                print(f"  {i}...")
+                await asyncio.sleep(1)
+        else:
+            baseline = await client.get_history(device, limit=5)
+            known = {_event_ts(e) for e in baseline if _event_ts(e)}
+            print(f"[watch] {len(known)} recent events known; ring the bell /")
+            print("  touch the keypad — openLock fires the moment a new event")
+            print(f"  appears (max wait {wait_secs} s)")
+
+        deadline = time.time() + wait_secs
+        attempt = 0
+        fired = False
+        while time.time() < deadline:
+            attempt += 1
+            if watch and not fired:
+                # wait for new event before first attempt
+                try:
+                    events = await client.get_history(device, limit=5)
+                    fresh = [e for e in events
+                             if _event_ts(e) and _event_ts(e) not in known]
+                    if not fresh:
+                        await asyncio.sleep(1.0)
+                        continue
+                except FcError:
+                    await asyncio.sleep(1.0)
+                    continue
+                # new event seen, fire immediately
+                fired = True
+            # attempt openLock
+            try:
+                result = await client.unlock(device)
+                if result.success:
+                    print(f"  [attempt {attempt}] openLock succeeded")
+                    return 0
+                else:
+                    msg = str(result.message or "")
+                    if "682" in msg or "500" in msg:
+                        left = deadline - time.time()
+                        print(f"  [attempt {attempt}] lock not ready (HTTP {msg}) — "
+                              f"retrying for {max(left, 0):.0f}s more "
+                              "(press 4 + # / ring the bell)")
+                    else:
+                        print(f"  [attempt {attempt}] {msg}")
+                        return 2
+            except FcError as err:
+                msg = str(err)
+                fired = True
+                if "682" in msg or "500" in msg:
+                    left = deadline - time.time()
+                    print(f"  [attempt {attempt}] lock not ready (HTTP {msg}) — "
+                          f"retrying for {max(left, 0):.0f}s more "
+                          "(press 4 + # / ring the bell)")
+                else:
+                    print(f"  [attempt {attempt}] {msg}")
+                    return 2
+            # if not success and not returned yet, wait before next retry
+            if time.time() < deadline:
+                await asyncio.sleep(5.0)
+        if fired:
+            print("RESULT: no new event observed during the window.")
+            return 1
+        print("RESULT: no attempts ran.")
         return 1
-    print("RESULT: no attempts ran.")
-    return 1
+    finally:
+        await client.close()
 
 
 def main() -> None:

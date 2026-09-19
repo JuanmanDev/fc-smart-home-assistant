@@ -39,7 +39,8 @@
         "data": {
           "poll_interval": "Poll interval (seconds, min 15)",
           "local_lan": "Enable local LAN control (WiFi locks / gateways, local-first)",
-          "local_ble": "Enable local Bluetooth control (requires bleak + USB/BlueZ adapter or ESPHome proxy)"
+          "local_ble": "Enable local Bluetooth control (requires bleak + USB/BlueZ adapter or ESPHome proxy)",
+          "concurrent_unlock": "Try Bluetooth and WiFi/Cloud simultaneously (faster unlock, whichever responds first)"
         }
       }
     }

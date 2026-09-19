@@ -7,7 +7,8 @@
 [![CI](https://github.com/JuanmanDev/fc-smart-home-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/JuanmanDev/fc-smart-home-assistant/actions/workflows/ci.yml)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-red.svg)](https://github.com/hacs/integration)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Sponsor](https://img.shields.io/badge/sponsor-JuanmanDev-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/JuanmanDev)
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=JuanmanDev&repository=fc-smart-home-assistant&category=integration)
 
 **Reverse-engineered Home Assistant integration + CLI for FC SmartHome locks**
@@ -43,7 +44,8 @@ app for everything you'd want from a home-automation hub:
 | Rename user | ✅ | | `fc_smarthome.rename_user` |
 | Fingerprint enrollment | ✅ | | `fc_smarthome.enroll_fingerprint` |
 | Real-time push events | history-delta | ✅ push | `event.*` entity + `fc_smarthome_event` bus event |
-| **Local LAN control** (WiFi locks/gateways) | | candidates | Alink CoAP channel implemented; needs pk/dn from cloud or capture |
+| **Local LAN / TCP 4067 control** | | ✅ reversed | Direct TCP 4067 / NAT redirect ([guide](docs/LOCAL-WIFI-ARCHITECTURE.md)) |
+| **Dual-channel concurrent unlock** | ✅ | ✅ | Race BLE & Cloud/WiFi simultaneously (options flow) |
 
 > **Status: endpoints extracted from the real APK.** The production server
 > (`www.fcsmartlock.com:443`), channels (test/test2/AWS-intl), image base URL

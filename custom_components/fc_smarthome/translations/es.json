@@ -39,7 +39,8 @@
         "data": {
           "poll_interval": "Intervalo de sondeo (segundos, min 15)",
           "local_lan": "Habilitar control local LAN (cerraduras WiFi / pasarelas, local-first)",
-          "local_ble": "Habilitar control local Bluetooth (BLE / ESPHome proxy)"
+          "local_ble": "Habilitar control local Bluetooth (BLE / ESPHome proxy)",
+          "concurrent_unlock": "Intentar apertura por Bluetooth y WiFi/Nube simultáneamente (el canal que responda primero abre)"
         }
       }
     }

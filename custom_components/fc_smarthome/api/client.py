@@ -594,6 +594,7 @@ class FcClient:
         # the HA layer (lock.py) and tools/unlock_awake_window.py.
         body = await self._post("remote_unlock", {
             "id": device_id,
+            "deviceId": device_id,
             "token": self.tokens.access_token,
             "timestamp": now_ms(),
         })
