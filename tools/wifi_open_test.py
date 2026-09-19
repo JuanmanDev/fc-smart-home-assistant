@@ -1,8 +1,8 @@
 """WiFi-only (cloud) open test: NO Bluetooth at all.
 
 Usage:
-    python tools\wifi_open_test.py            # countdown, then fire openLock
-    python tools\wifi_open_test.py --watch    # auto-fire when lock wakes
+    python tools/wifi_open_test.py            # countdown, then fire openLock
+    python tools/wifi_open_test.py --watch    # auto-fire when lock wakes
 
 Pure WiFi path, exactly what the HA integration does when no ESP32
 Bluetooth proxy exists: login -> POST /v2/lock/openLock -> retry for a
@@ -15,7 +15,6 @@ Exit codes: 0 = openLock succeeded, 1 = lock never woke in the window,
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import sys
